@@ -16,3 +16,4 @@ services:
       retries: 3
 volumes:
   roomcomms-data:
+    name: roomcomms-data
