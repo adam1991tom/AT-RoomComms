@@ -1,0 +1,25 @@
+services:
+  at-roomcomms:
+    build:
+      context: ..
+      dockerfile: AT-RoomComms-v1.0.0/Dockerfile
+    image: at-roomcomms:1.0.0
+    container_name: at-roomcomms
+    restart: unless-stopped
+    ports:
+      - "5070:5070"
+    environment:
+      ROOMCOMMS_DATA: /data
+    volumes:
+      - roomcomms-data:/data
+    healthcheck:
+      test: ["CMD","python","-c","import urllib.request; urllib.request.urlopen('http://localhost:5070/api/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  roomcomms-data:
+    external: true
+    name: roomcomms-data
