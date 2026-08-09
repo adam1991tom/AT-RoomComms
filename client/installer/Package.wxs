@@ -1,0 +1,60 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="AT RoomComms Client"
+    Manufacturer="AT Software"
+    Version="0.2.0"
+    UpgradeCode="D3BE402A-7A06-47AE-8F6C-C0E63D0D52F4"
+    Scope="perMachine"
+    InstallerVersion="500"
+    Compressed="yes">
+
+    <SummaryInformation Description="AT RoomComms Windows Client" Manufacturer="AT Software" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of AT RoomComms Client is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Property Id="SERVERURL" Secure="yes" />
+    <Icon Id="AppIcon" SourceFile="$(var.IconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="AT RoomComms Client" />
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="PROGRAMMENUFOLDER" Name="AT RoomComms">
+        <Component Id="MenuShortcuts" Guid="*">
+          <Shortcut Id="AppShortcut"
+                    Name="AT RoomComms"
+                    Description="Open AT RoomComms"
+                    Target="[INSTALLFOLDER]ATRoomComms.Client.exe"
+                    WorkingDirectory="INSTALLFOLDER"
+                    Icon="AppIcon" />
+          <Shortcut Id="ChangeServerShortcut"
+                    Name="Change RoomComms Server"
+                    Description="Change the AT RoomComms server address"
+                    Target="[INSTALLFOLDER]ATRoomComms.Client.exe"
+                    Arguments="--change-server"
+                    WorkingDirectory="INSTALLFOLDER"
+                    Icon="AppIcon" />
+          <RemoveFolder Id="RemoveProgramMenuFolder" On="uninstall" />
+          <RegistryValue Root="HKLM" Key="SOFTWARE\AT Software\AT RoomComms Client" Name="ShortcutsInstalled" Type="integer" Value="1" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+    <ComponentGroup Id="ConfigurationComponents">
+      <Component Id="MachineConfiguration" Directory="INSTALLFOLDER" Guid="*">
+        <RegistryValue Root="HKLM" Key="SOFTWARE\AT Software\AT RoomComms Client" Name="ServerUrl" Type="string" Value="[SERVERURL]" />
+        <RegistryValue Root="HKLM" Key="SOFTWARE\AT Software\AT RoomComms Client" Name="InstalledVersion" Type="string" Value="0.2.0" KeyPath="yes" />
+      </Component>
+      <Component Id="MachineStartup" Directory="INSTALLFOLDER" Guid="*">
+        <RegistryValue Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Run" Name="AT RoomComms Client" Type="string" Value="&quot;[INSTALLFOLDER]ATRoomComms.Client.exe&quot;" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <Feature Id="MainFeature" Title="AT RoomComms Client" Level="1">
+      <ComponentGroupRef Id="PublishedFiles" />
+      <ComponentGroupRef Id="ConfigurationComponents" />
+      <ComponentRef Id="MenuShortcuts" />
+    </Feature>
+  </Package>
+</Wix>

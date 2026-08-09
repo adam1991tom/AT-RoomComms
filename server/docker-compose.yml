@@ -1,0 +1,20 @@
+services:
+  at-roomcomms:
+    build:
+      context: .
+    container_name: at-roomcomms
+    restart: unless-stopped
+    ports:
+      - "${ROOMCOMMS_PORT:-5070}:5070"
+    environment:
+      ROOMCOMMS_DB: /data/roomcomms.db
+      ROOMCOMMS_UPLOADS: /data/uploads
+      TZ: ${TZ:-Europe/London}
+    volumes:
+      - roomcomms-data:/data
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  roomcomms-data:
+    name: roomcomms-data
