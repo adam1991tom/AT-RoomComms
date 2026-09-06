@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 WORKDIR /app
 
-# V1 uses the proven v0.3.4 application (live chat overhaul) as the functional baseline.
+# V1 uses the proven v0.4.0 application (room-scoped operator logins, live chat) as the functional baseline.
 COPY AT-RoomComms-v0.3.3/server/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY AT-RoomComms-v0.3.3/server /app
@@ -12,7 +12,7 @@ COPY AT-RoomComms-v1.0.0/entrypoint.py /app/entrypoint.py
 RUN python - <<'PY'
 from pathlib import Path
 p=Path('/app/static/index.html')
-s=p.read_text(encoding='utf-8').replace('v0.3.4','v1.0.0')
+s=p.read_text(encoding='utf-8').replace('v0.4.0','v1.0.0')
 p.write_text(s,encoding='utf-8')
 PY
 
