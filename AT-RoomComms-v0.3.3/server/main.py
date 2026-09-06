@@ -93,6 +93,7 @@ CREATE TABLE IF NOT EXISTS help_requests(id INTEGER PRIMARY KEY AUTOINCREMENT,ev
         c.execute("INSERT OR IGNORE INTO settings VALUES('control_centre_name','Speaker Preview')")
         c.execute("INSERT OR IGNORE INTO settings VALUES('attachment_limit_mb','25')")
         c.execute("INSERT OR IGNORE INTO settings VALUES('daily_logoff_utc','03:00')")
+        c.execute("INSERT OR IGNORE INTO settings VALUES('ui_theme','blue')")
         # Deliberately do NOT seed passwords. Existing v0.3.2 installations have no
         # setup_complete key, so the first-run wizard will repair the privileged accounts.
 init()
@@ -199,7 +200,9 @@ def home():return HTMLResponse((Path(__file__).parent/'static'/'index.html').rea
 @app.get('/api/health')
 def health():return {'status':'ok','version':VERSION}
 @app.get('/api/setup/status')
-def setup_status():return {'needs_setup':not setup_complete(),'version':VERSION}
+def setup_status():
+    with db() as c:theme=setting(c,'ui_theme','blue')
+    return {'needs_setup':not setup_complete(),'version':VERSION,'theme':theme}
 @app.post('/api/setup/complete')
 def finish_setup(x:SetupIn):
     with db() as c:
@@ -273,7 +276,7 @@ def bootstrap(authorization:str|None=Header(default=None)):
             event=c.execute('SELECT * FROM events WHERE id=?',(a['event_id'],)).fetchone()
             assignment=c.execute('SELECT * FROM event_rooms WHERE event_id=? AND room_id=?',(a['event_id'],a['room_id'])).fetchone()
             help_requests=[dict(r) for r in c.execute("SELECT * FROM help_requests WHERE room_id=? AND status NOT IN ('resolved','cancelled') ORDER BY id DESC",(a['room_id'],))]
-            return {'version':VERSION,'me':a,'settings':{'venue_name':setting(c,'venue_name'),'control_centre_name':setting(c,'control_centre_name')},'room':dict(room) if room else None,'event':dict(event) if event else None,'assignment':dict(assignment) if assignment else None,'help_requests':help_requests}
+            return {'version':VERSION,'me':a,'settings':{'venue_name':setting(c,'venue_name'),'control_centre_name':setting(c,'control_centre_name'),'ui_theme':setting(c,'ui_theme','blue')},'room':dict(room) if room else None,'event':dict(event) if event else None,'assignment':dict(assignment) if assignment else None,'help_requests':help_requests}
         return {'version':VERSION,'me':a,'settings':{r['key']:r['value'] for r in c.execute('SELECT * FROM settings')},'rooms':[dict(r) for r in c.execute('SELECT * FROM rooms WHERE enabled=1 ORDER BY name')],'events':[dict(r) for r in c.execute('SELECT * FROM events WHERE archived=0 ORDER BY starts_at,name')],'event_rooms':[dict(r) for r in c.execute('SELECT * FROM event_rooms')],'operators':[dict(r) for r in c.execute('SELECT * FROM operators WHERE active=1 ORDER BY name')],'devices':[dict(r) for r in c.execute('SELECT * FROM devices ORDER BY name')],'help_requests':[dict(r) for r in c.execute("SELECT * FROM help_requests WHERE status NOT IN ('resolved','cancelled') ORDER BY id DESC")]}
 
 @app.post('/api/events')
@@ -374,7 +377,8 @@ def account_disable(aid:int,authorization:str|None=Header(default=None)):
 
 @app.patch('/api/settings')
 def settings_update(p:dict,authorization:str|None=Header(default=None)):
-    a=require_auth(authorization);require_admin(a);allowed={'venue_name','control_centre_name','daily_logoff_utc'}
+    a=require_auth(authorization);require_admin(a);allowed={'venue_name','control_centre_name','daily_logoff_utc','ui_theme'}
+    if 'ui_theme' in p and p['ui_theme'] not in ('blue','purple','green','orange'):raise HTTPException(400,'Invalid theme')
     with db() as c:
         for k,v in p.items():
             if k in allowed:c.execute('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',(k,str(v)))
