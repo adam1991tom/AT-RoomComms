@@ -1,6 +1,19 @@
-# AT RoomComms v0.3.4
+# AT RoomComms v0.4.0
 
 AT RoomComms is a self-hosted live-event operations and room communications platform for managing events, rooms, operators, messages, help requests, and privileged Control Centre logins from a web interface.
+
+## What changed in v0.4.0
+
+Room laptops can now sign themselves in as the actual room, instead of everyone sharing the Control Centre login:
+
+- **Operator room sign-in.** A room laptop picks its operator name from the list Control Centre has already set up (no password), plus the event, the room, and whether it's the Main or Backup PC for that session. That session only sees its own room's Operations Feed — not other rooms, not the venue or event feeds, not the Control Centre navigation. Admin and Speaker Preview logins are unchanged and still see everything.
+- **Emergency reply threads.** Replying to an emergency-priority room message opens a private thread visible only to Control Centre and whoever raised the alert — not the rest of the room, even other operators sharing that room's Main/Backup PCs.
+- **Direct messages.** Simple person-to-person messaging (`/api/dm`) between any two logged-in people; a room operator can only message Control Centre accounts, not other operators.
+- **Daily sign-out.** A configurable UTC cutoff (System Settings, default `03:00`) logs *everyone* out — Admin, Speaker Preview, and every room operator session — enforced on every request rather than a timer alone, so it can't be skipped by a container restart landing near the cutoff.
+
+Known gaps, deliberately left for a later pass: room status changes are still Control-Centre-only (an operator sees their room's status but can't change it), and Main/Backup notification suppression needs real Windows notification logic in the dedicated client — the current client is a plain embedded browser window, so it can't yet distinguish "silent, no popups" (Main) from "quiet visual alert" (Backup).
+
+This adds `operator_sessions` and a few `messages` columns (`sender_kind`, `to_kind`, `to_id`), applied automatically on boot like every other schema change in this app — no manual DB work on upgrade.
 
 ## What changed in v0.3.4
 
@@ -43,6 +56,10 @@ When upgrading from v0.3.2, existing event, room, operator, message, attachment,
 Because v0.3.2 used seeded privileged accounts, v0.3.3 intentionally treats an installation without the `setup_complete` setting as requiring first-run setup. Completing the wizard rebuilds the privileged login accounts while preserving the operational data in the database.
 
 ## Login roles
+
+### Room operator (new in v0.4.0)
+
+Signs in from a room laptop by picking their name, event, room, and Main/Backup role — no password. Sees only their own room's Operations Feed, can send Help Requests, and can message Control Centre directly or privately follow up on an emergency they raised. Cannot see other rooms, the venue/event feeds, or any Control Centre management page.
 
 ### Administrator
 
@@ -180,4 +197,4 @@ If an older RoomComms data volume is detected during first installation of the p
 
 ## Version
 
-Current release: **v0.3.4**
+Current release: **v0.4.0**
