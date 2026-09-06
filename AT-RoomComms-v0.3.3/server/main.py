@@ -6,7 +6,7 @@ from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-VERSION='0.5.1'
+VERSION='0.5.2'
 DATA=Path(os.getenv('ROOMCOMMS_DATA','/data')); DB=DATA/'roomcomms.db'; UP=DATA/'uploads'
 DATA.mkdir(parents=True,exist_ok=True); UP.mkdir(exist_ok=True)
 app=FastAPI(title='AT RoomComms',version=VERSION)
@@ -270,7 +270,7 @@ def operator_login_options():
             events.append({**dict(e),'rooms':rooms})
     return {'operators':operators,'events':events}
 @app.post('/api/operator/login')
-def operator_login(x:OperatorLoginIn):
+async def operator_login(x:OperatorLoginIn):
     if not setup_complete():raise HTTPException(503,'First run setup required')
     if x.device_role not in ('main','backup'):raise HTTPException(400,'Invalid device role')
     with db() as c:
@@ -280,6 +280,9 @@ def operator_login(x:OperatorLoginIn):
         if not c.execute('SELECT 1 FROM rooms WHERE id=? AND enabled=1 AND event_id=?',(x.room_id,x.event_id)).fetchone():raise HTTPException(400,'That room is not part of that event')
         token=secrets.token_urlsafe(32)
         c.execute('INSERT INTO operator_sessions(token,operator_id,event_id,room_id,device_role,device_name,created_at) VALUES(?,?,?,?,?,?,?)',(token,op['id'],x.event_id,x.room_id,x.device_role,x.device_name.strip(),now()))
+        c.execute('UPDATE rooms SET operator_name=? WHERE id=?',(op['name'],x.room_id))
+        room=dict(c.execute('SELECT * FROM rooms WHERE id=?',(x.room_id,)).fetchone())
+    await manager.broadcast({'type':'room_updated','room':room},visible=lambda actor:actor['kind']=='account')
     return {'token':token,'user':{'id':op['id'],'display_name':op['name'],'kind':'operator','room_id':x.room_id,'event_id':x.event_id,'device_role':x.device_role}}
 @app.post('/api/operator/logout')
 def operator_logout(authorization:str|None=Header(default=None)):

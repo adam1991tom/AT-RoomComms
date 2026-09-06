@@ -1,4 +1,4 @@
-const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];let token=localStorage.getItem('rc_token')||'',S={d:null,view:'control',feed:null,rerender:null,unread:0},ws=null,wsRetry=0;
+const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];let token=localStorage.getItem('rc_token')||'',S={d:null,view:'control',feed:null,rerender:null,unread:0,unreadDM:{}},ws=null,wsRetry=0;
 const BASE_TITLE=document.title;
 function bumpUnread(){S.unread++;renderUnread()}
 function clearUnread(){if(!S.unread)return;S.unread=0;renderUnread()}
@@ -83,6 +83,11 @@ function wsHandle(msg){
         const other=mine?{kind:m.to_kind,id:m.to_id}:{kind:m.sender_kind,id:m.sender_id};
         const open=S.dmWith&&S.dmWith.kind===other.kind&&S.dmWith.id===other.id;
         if(open)feedAppend(m);
+        if(!mine&&!open){
+            S.unreadDM[other.kind+':'+other.id]=true;
+            updateDMBadge();
+            if(S.view==='dm')loadDMContacts();
+        }
         if(!mine&&(!open||document.hidden))bumpUnread();
         return;
     }
@@ -102,6 +107,15 @@ function wsHandle(msg){
         const canOpen=S.d.me.kind==='account';
         const r=canOpen?S.d.rooms.find(x=>x.id===msg.room_id):null;
         showToast(`🚨 <b>EMERGENCY</b> — ${esc(msg.room_name||'Room')}${msg.event_name?` (${esc(msg.event_name)})`:''}: ${esc(msg.body)}`,r?()=>openRoom(r.event_id,r.id):null);
+        return;
+    }
+    if(msg.type==='room_updated'){
+        if(S.d.rooms){
+            const i=S.d.rooms.findIndex(r=>r.id===msg.room.id);
+            if(i>-1)S.d.rooms[i]=msg.room;else S.d.rooms.push(msg.room);
+            renderChrome();
+            S.rerender&&S.rerender();
+        }
         return;
     }
     const mineMsg=m=>m.sender_kind===S.d.me.kind&&m.sender_id===S.d.me.id;
@@ -148,6 +162,11 @@ function renderOpHelpBanner(){
 function updateHelpBadge(){
     const el=$('#helpBadge');if(!el)return;
     const n=(S.d.help_requests||[]).filter(h=>h.status==='new').length;
+    el.textContent=n;el.classList.toggle('hidden',n===0);
+}
+function updateDMBadge(){
+    const el=$('#dmBadge');if(!el)return;
+    const n=Object.keys(S.unreadDM||{}).length;
     el.textContent=n;el.classList.toggle('hidden',n===0);
 }
 function upsertHelpRequest(hr){
@@ -218,8 +237,8 @@ window.openHelpThread=openHelpThread;
 function dmPage(){const isOp=S.d.me.kind==='operator';S.view='dm';S.feed=null;S.dmWith=null;title('Direct Messages','Person to person');$('#content').innerHTML=`${isOp?'<div class="toolbar" style="justify-content:flex-start"><button class="btn secondary" onclick="renderOperatorApp()">← Back to room</button></div>':''}<div class="grid2"><div class="card" id="dmContacts"><div class="cardHead"><h2>People</h2></div><div class="body">Loading…</div></div><div class="card feedCard" id="dmThreadCard" style="display:none"><div class="cardHead"><h2 id="dmWithName"></h2></div><div class="feed" id="feedList"></div><div class="composer" style="grid-template-columns:auto 1fr auto"><div style="display:flex;gap:6px">${attachBtn('dmFile')}${emojiBtn('dmMsg')}</div><input class="inlineInput" id="dmMsg" placeholder="Message" onkeydown="if(event.key==='Enter'){event.preventDefault();sendDM()}"><button class="btn" onclick="sendDM()">Send</button></div></div></div>`;loadDMContacts()}
 window.dmPage=dmPage;
 function jsStr(s){return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'")}
-async function loadDMContacts(){const list=await api('/api/dm/contacts');const el=$('#dmContacts');if(!el)return;el.innerHTML=`<div class="cardHead"><h2>People</h2></div>`+(list.map(p=>`<div class="listRow" style="cursor:pointer" onclick="openDM('${p.kind}',${p.id},'${esc(jsStr(p.display_name))}')"><b>${esc(p.display_name)}</b><small>${p.kind==='operator'?'Operator':'Control Centre'}</small></div>`).join('')||'<div class="body">Nobody to message yet.</div>')}
-async function openDM(kind,id,name){S.dmWith={kind,id};$('#dmThreadCard').style.display='';$('#dmWithName').textContent=name;const ms=await api(`/api/dm?with_kind=${kind}&with_id=${id}`);$('#feedList').innerHTML=ms.map(messageHtml).join('')||'<div class="body feedEmpty">No messages yet.</div>';scrollFeedBottom()}
+async function loadDMContacts(){const list=await api('/api/dm/contacts');const el=$('#dmContacts');if(!el)return;el.innerHTML=`<div class="cardHead"><h2>People</h2></div>`+(list.map(p=>`<div class="listRow" style="cursor:pointer" onclick="openDM('${p.kind}',${p.id},'${esc(jsStr(p.display_name))}')"><b>${esc(p.display_name)}</b>${S.unreadDM[p.kind+':'+p.id]?'<span class="navBadge">•</span>':''}<small>${p.kind==='operator'?'Operator':'Control Centre'}</small></div>`).join('')||'<div class="body">Nobody to message yet.</div>')}
+async function openDM(kind,id,name){S.dmWith={kind,id};delete S.unreadDM[kind+':'+id];updateDMBadge();$('#dmThreadCard').style.display='';$('#dmWithName').textContent=name;const ms=await api(`/api/dm?with_kind=${kind}&with_id=${id}`);$('#feedList').innerHTML=ms.map(messageHtml).join('')||'<div class="body feedEmpty">No messages yet.</div>';scrollFeedBottom();loadDMContacts()}
 window.openDM=openDM;
 async function sendDM(){if(!S.dmWith)return;const input=$('#dmMsg'),f=$('#dmFile')?.files[0],v=input.value.trim()||(f?'Attachment':'');if(!v)return;input.value='';const m=await api('/api/dm',{method:'POST',body:JSON.stringify({to_kind:S.dmWith.kind,to_id:S.dmWith.id,body:v})});feedAppend(m);const updated=await uploadIfAttached('dmFile',m.id);if(updated)feedReplace(updated)}
 window.sendDM=sendDM;
