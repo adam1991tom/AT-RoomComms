@@ -32,7 +32,8 @@ function renderChrome(){const d=S.d;$('#app').classList.remove('operatorMode');$
 async function renderOperatorApp(){
     const d=S.d;
     $('#app').classList.add('operatorMode');
-    $$('.nav[data-view]').forEach(b=>b.style.display='none');
+    $$('.nav[data-view]').forEach(b=>b.style.display=b.dataset.view==='dm'?'':'none');
+    $$('.nav[data-view="dm"]').forEach(b=>{b.classList.toggle('active',S.view==='dm');b.onclick=()=>{$$('.nav').forEach(x=>x.classList.remove('active'));b.classList.add('active');dmPage()}});
     $('.stats').style.display='none';
     $('#venue').textContent=d.settings.venue_name||'Venue';
     $('#eventNav').innerHTML='';
@@ -90,7 +91,7 @@ async function refreshEmergencyThread(mid){
 async function sendEmergencyReply(mid){const input=$('#threadMsg');if(!input)return;const v=input.value.trim();if(!v)return;input.value='';await api('/api/messages',{method:'POST',body:JSON.stringify({scope:'emergency_thread',scope_id:mid,body:v,priority:'normal'})});await refreshEmergencyThread(mid)}
 window.sendEmergencyReply=sendEmergencyReply;
 
-function dmPage(){S.view='dm';S.feed=null;S.dmWith=null;title('Direct Messages','Person to person');$('#content').innerHTML=`<div class="grid2"><div class="card" id="dmContacts"><div class="cardHead"><h2>People</h2></div><div class="body">Loading…</div></div><div class="card feedCard" id="dmThreadCard" style="display:none"><div class="cardHead"><h2 id="dmWithName"></h2></div><div class="feed" id="feedList"></div><div class="composer" style="grid-template-columns:1fr auto"><input class="inlineInput" id="dmMsg" placeholder="Message" onkeydown="if(event.key==='Enter'){event.preventDefault();sendDM()}"><button class="btn" onclick="sendDM()">Send</button></div></div></div>`;loadDMContacts()}
+function dmPage(){const isOp=S.d.me.kind==='operator';S.view='dm';S.feed=null;S.dmWith=null;title('Direct Messages','Person to person');$('#content').innerHTML=`${isOp?'<div class="toolbar" style="justify-content:flex-start"><button class="btn secondary" onclick="renderOperatorApp()">← Back to room</button></div>':''}<div class="grid2"><div class="card" id="dmContacts"><div class="cardHead"><h2>People</h2></div><div class="body">Loading…</div></div><div class="card feedCard" id="dmThreadCard" style="display:none"><div class="cardHead"><h2 id="dmWithName"></h2></div><div class="feed" id="feedList"></div><div class="composer" style="grid-template-columns:1fr auto"><input class="inlineInput" id="dmMsg" placeholder="Message" onkeydown="if(event.key==='Enter'){event.preventDefault();sendDM()}"><button class="btn" onclick="sendDM()">Send</button></div></div></div>`;loadDMContacts()}
 window.dmPage=dmPage;
 function jsStr(s){return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'")}
 async function loadDMContacts(){const list=await api('/api/dm/contacts');const el=$('#dmContacts');if(!el)return;el.innerHTML=`<div class="cardHead"><h2>People</h2></div>`+(list.map(p=>`<div class="listRow" style="cursor:pointer" onclick="openDM('${p.kind}',${p.id},'${esc(jsStr(p.display_name))}')"><b>${esc(p.display_name)}</b><small>${p.kind==='operator'?'Operator':'Control Centre'}</small></div>`).join('')||'<div class="body">Nobody to message yet.</div>')}
