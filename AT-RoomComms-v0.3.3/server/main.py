@@ -6,7 +6,7 @@ from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-VERSION='0.4.1'
+VERSION='0.5.0'
 DATA=Path(os.getenv('ROOMCOMMS_DATA','/data')); DB=DATA/'roomcomms.db'; UP=DATA/'uploads'
 DATA.mkdir(parents=True,exist_ok=True); UP.mkdir(exist_ok=True)
 app=FastAPI(title='AT RoomComms',version=VERSION)
@@ -92,6 +92,9 @@ CREATE TABLE IF NOT EXISTS help_requests(id INTEGER PRIMARY KEY AUTOINCREMENT,ev
         if 'help_request_id' not in mcols:c.execute('ALTER TABLE messages ADD COLUMN help_request_id INTEGER')
         hcols=[r['name'] for r in c.execute('PRAGMA table_info(help_requests)')]
         if 'broadcast' not in hcols:c.execute('ALTER TABLE help_requests ADD COLUMN broadcast INTEGER DEFAULT 0')
+        if 'scope' not in hcols:
+            c.execute("ALTER TABLE help_requests ADD COLUMN scope TEXT DEFAULT 'room'")
+            c.execute("UPDATE help_requests SET scope='venue' WHERE broadcast=1")
         rcols=[r['name'] for r in c.execute('PRAGMA table_info(rooms)')]
         if 'event_id' not in rcols:
             c.execute('ALTER TABLE rooms ADD COLUMN event_id INTEGER')
@@ -128,7 +131,7 @@ class PasswordIn(BaseModel): password:str
 class MessageIn(BaseModel): scope:str; scope_id:int|None=None; body:str=''; priority:str='normal'
 class MessageEdit(BaseModel): body:str
 class DeviceIn(BaseModel): name:str; role:str='general'; room_id:int|None=None; event_id:int|None=None; operator:str=''; app_version:str=''
-class HelpIn(BaseModel): event_id:int|None=None; room_id:int|None=None; requested_by:str=''; category:str; description:str; priority:str='important'; broadcast:bool=False
+class HelpIn(BaseModel): event_id:int|None=None; room_id:int|None=None; requested_by:str=''; category:str; description:str; priority:str='important'; scope:str='room'
 class OperatorLoginIn(BaseModel): operator_id:int; event_id:int; room_id:int; device_role:str='main'; device_name:str=''
 class DMIn(BaseModel): to_kind:str; to_id:int; body:str
 
@@ -182,29 +185,32 @@ def actor_can_access(actor,c,scope,scope_id):
         orig=c.execute('SELECT sender_kind,sender_id FROM messages WHERE id=?',(scope_id,)).fetchone()
         return bool(orig) and orig['sender_kind']=='operator' and orig['sender_id']==actor['id']
     if scope=='help_thread':
-        hr=c.execute('SELECT room_id,broadcast FROM help_requests WHERE id=?',(scope_id,)).fetchone()
-        return bool(hr) and (hr['room_id']==actor['room_id'] or hr['broadcast'])
+        hr=c.execute('SELECT room_id,event_id,scope FROM help_requests WHERE id=?',(scope_id,)).fetchone()
+        return bool(hr) and (hr['room_id']==actor['room_id'] or hr['scope']=='venue' or (hr['scope']=='event' and hr['event_id']==actor['event_id']))
     return False
 def message_access_ok(actor,c,m):
     if m['scope']=='dm':
         return (m['sender_kind'],m['sender_id'])==(actor['kind'],actor['id']) or (m['to_kind'],m['to_id'])==(actor['kind'],actor['id'])
     return actor_can_access(actor,c,m['scope'],m['scope_id'])
 def broadcast_extras(c,scope,scope_id):
-    thread_owner=None;help_room_id=None;help_broadcast=False
+    thread_owner=None;help_room_id=None;help_event_id=None;help_scope='room'
     if scope=='emergency_thread':
         orig=c.execute('SELECT sender_kind,sender_id FROM messages WHERE id=?',(scope_id,)).fetchone()
         if orig:thread_owner=(orig['sender_kind'],orig['sender_id'])
     elif scope=='help_thread':
-        hr=c.execute('SELECT room_id,broadcast FROM help_requests WHERE id=?',(scope_id,)).fetchone()
-        if hr:help_room_id=hr['room_id'];help_broadcast=bool(hr['broadcast'])
-    return thread_owner,help_room_id,help_broadcast
-def visible_predicate(scope,scope_id,thread_owner=None,help_room_id=None,help_broadcast=False):
+        hr=c.execute('SELECT room_id,event_id,scope FROM help_requests WHERE id=?',(scope_id,)).fetchone()
+        if hr:help_room_id=hr['room_id'];help_event_id=hr['event_id'];help_scope=hr['scope'] or 'room'
+    return thread_owner,help_room_id,help_event_id,help_scope
+def visible_predicate(scope,scope_id,thread_owner=None,help_room_id=None,help_event_id=None,help_scope='room',priority=None):
     if scope=='room':
+        if priority=='emergency':return lambda actor:True
         return lambda actor:actor['kind']=='account' or (actor['kind']=='operator' and actor['room_id']==scope_id)
     if scope=='emergency_thread':
         return lambda actor:actor['kind']=='account' or (actor['kind']=='operator' and thread_owner==(actor['kind'],actor['id']))
     if scope=='help_thread':
-        return lambda actor:actor['kind']=='account' or (actor['kind']=='operator' and (actor['room_id']==help_room_id or help_broadcast))
+        if help_scope=='venue':return lambda actor:True
+        if help_scope=='event':return lambda actor:actor['kind']=='account' or (actor['kind']=='operator' and actor['event_id']==help_event_id)
+        return lambda actor:actor['kind']=='account' or (actor['kind']=='operator' and actor['room_id']==help_room_id)
     return lambda actor:actor['kind']=='account'
 
 @app.get('/',response_class=HTMLResponse)
@@ -288,7 +294,7 @@ def bootstrap(authorization:str|None=Header(default=None)):
         if a['kind']=='operator':
             room=c.execute('SELECT * FROM rooms WHERE id=?',(a['room_id'],)).fetchone()
             event=c.execute('SELECT * FROM events WHERE id=?',(a['event_id'],)).fetchone()
-            help_requests=[dict(r) for r in c.execute("SELECT * FROM help_requests WHERE (room_id=? OR broadcast=1) AND status NOT IN ('resolved','cancelled') ORDER BY id DESC",(a['room_id'],))]
+            help_requests=[dict(r) for r in c.execute("SELECT * FROM help_requests WHERE (room_id=? OR scope='venue' OR (scope='event' AND event_id=?)) AND status NOT IN ('resolved','cancelled') ORDER BY id DESC",(a['room_id'],a['event_id']))]
             return {'version':VERSION,'me':a,'settings':{'venue_name':setting(c,'venue_name'),'control_centre_name':setting(c,'control_centre_name'),'ui_theme':setting(c,'ui_theme','blue')},'room':dict(room) if room else None,'event':dict(event) if event else None,'help_requests':help_requests}
         return {'version':VERSION,'me':a,'settings':{r['key']:r['value'] for r in c.execute('SELECT * FROM settings')},'rooms':[dict(r) for r in c.execute('SELECT * FROM rooms WHERE enabled=1 ORDER BY event_id,name')],'events':[dict(r) for r in c.execute('SELECT * FROM events WHERE archived=0 ORDER BY starts_at,name')],'operators':[dict(r) for r in c.execute('SELECT * FROM operators WHERE active=1 ORDER BY name')],'devices':[dict(r) for r in c.execute('SELECT * FROM devices ORDER BY name')],'help_requests':[dict(r) for r in c.execute("SELECT * FROM help_requests WHERE status NOT IN ('resolved','cancelled') ORDER BY id DESC")]}
 
@@ -409,18 +415,27 @@ async def message_create(x:MessageIn,authorization:str|None=Header(default=None)
     if not body:raise HTTPException(400,'Message cannot be empty')
     with db() as c:
         if not actor_can_access(a,c,x.scope,x.scope_id):raise HTTPException(403,'No access to this feed')
-        thread_owner=None;help_room_id=None;help_broadcast=False
+        thread_owner=None;help_room_id=None;help_event_id=None;help_scope='room'
         if x.scope=='emergency_thread':
             orig=c.execute('SELECT sender_kind,sender_id FROM messages WHERE id=?',(x.scope_id,)).fetchone()
             if not orig:raise HTTPException(404,'Original message not found')
             thread_owner=(orig['sender_kind'],orig['sender_id'])
         if x.scope=='help_thread':
-            hr=c.execute('SELECT room_id,broadcast FROM help_requests WHERE id=?',(x.scope_id,)).fetchone()
+            hr=c.execute('SELECT room_id,event_id,scope FROM help_requests WHERE id=?',(x.scope_id,)).fetchone()
             if not hr:raise HTTPException(404,'Help request not found')
-            help_room_id=hr['room_id'];help_broadcast=bool(hr['broadcast'])
+            help_room_id=hr['room_id'];help_event_id=hr['event_id'];help_scope=hr['scope'] or 'room'
         mid=c.execute('INSERT INTO messages(scope,scope_id,sender,sender_id,sender_kind,body,priority,created_at) VALUES(?,?,?,?,?,?,?,?)',(x.scope,x.scope_id,a['display_name'],a['id'],a['kind'],body,x.priority,now())).lastrowid
         d=message_dict(c,mid)
-    await manager.broadcast({'type':'message_new','message':d},visible=visible_predicate(x.scope,x.scope_id,thread_owner=thread_owner,help_room_id=help_room_id,help_broadcast=help_broadcast))
+        emg_room_name=emg_event_name=None
+        if x.scope=='room' and x.priority=='emergency':
+            room=c.execute('SELECT name,event_id FROM rooms WHERE id=?',(x.scope_id,)).fetchone()
+            if room:
+                emg_room_name=room['name']
+                ev=c.execute('SELECT name FROM events WHERE id=?',(room['event_id'],)).fetchone()
+                emg_event_name=ev['name'] if ev else ''
+    await manager.broadcast({'type':'message_new','message':d},visible=visible_predicate(x.scope,x.scope_id,thread_owner=thread_owner,help_room_id=help_room_id,help_event_id=help_event_id,help_scope=help_scope,priority=x.priority))
+    if emg_room_name is not None:
+        await manager.broadcast({'type':'emergency_alert','room_id':x.scope_id,'room_name':emg_room_name,'event_name':emg_event_name,'body':body,'sender':a['display_name'],'sender_kind':a['kind'],'sender_id':a['id'],'message_id':mid})
     return d
 @app.patch('/api/messages/{mid}')
 async def message_edit(mid:int,x:MessageEdit,authorization:str|None=Header(default=None)):
@@ -435,8 +450,8 @@ async def message_edit(mid:int,x:MessageEdit,authorization:str|None=Header(defau
         if not body:raise HTTPException(400,'Message cannot be empty')
         c.execute('UPDATE messages SET body=?,edited_at=? WHERE id=?',(body,now(),mid))
         d=message_dict(c,mid)
-        thread_owner,help_room_id,help_broadcast=broadcast_extras(c,m['scope'],m['scope_id'])
-    await manager.broadcast({'type':'message_updated','message':d},visible=visible_predicate(m['scope'],m['scope_id'],thread_owner=thread_owner,help_room_id=help_room_id,help_broadcast=help_broadcast))
+        thread_owner,help_room_id,help_event_id,help_scope=broadcast_extras(c,m['scope'],m['scope_id'])
+    await manager.broadcast({'type':'message_updated','message':d},visible=visible_predicate(m['scope'],m['scope_id'],thread_owner=thread_owner,help_room_id=help_room_id,help_event_id=help_event_id,help_scope=help_scope,priority=m['priority']))
     return d
 @app.delete('/api/messages/{mid}')
 async def message_delete(mid:int,authorization:str|None=Header(default=None)):
@@ -449,8 +464,8 @@ async def message_delete(mid:int,authorization:str|None=Header(default=None)):
         if not (is_owner or is_admin_override):raise HTTPException(403,'You can only delete your own messages')
         c.execute('UPDATE messages SET deleted_at=? WHERE id=?',(now(),mid))
         scope,scope_id=m['scope'],m['scope_id']
-        thread_owner,help_room_id,help_broadcast=broadcast_extras(c,scope,scope_id)
-    await manager.broadcast({'type':'message_deleted','id':mid,'scope':scope,'scope_id':scope_id},visible=visible_predicate(scope,scope_id,thread_owner=thread_owner,help_room_id=help_room_id,help_broadcast=help_broadcast))
+        thread_owner,help_room_id,help_event_id,help_scope=broadcast_extras(c,scope,scope_id)
+    await manager.broadcast({'type':'message_deleted','id':mid,'scope':scope,'scope_id':scope_id},visible=visible_predicate(scope,scope_id,thread_owner=thread_owner,help_room_id=help_room_id,help_event_id=help_event_id,help_scope=help_scope,priority=m['priority']))
     return {'ok':True}
 @app.post('/api/messages/{mid}/attachments')
 async def attachment_add(mid:int,file:UploadFile=File(...),authorization:str|None=Header(default=None)):
@@ -467,13 +482,13 @@ async def attachment_add(mid:int,file:UploadFile=File(...),authorization:str|Non
     with db() as c:
         c.execute('INSERT INTO attachments(message_id,original_name,stored_name,mime_type,size) VALUES(?,?,?,?,?)',(mid,file.filename or safe,stored,file.content_type or '',size))
         d=message_dict(c,mid)
-        thread_owner,help_room_id,help_broadcast=broadcast_extras(c,m['scope'],m['scope_id'])
+        thread_owner,help_room_id,help_event_id,help_scope=broadcast_extras(c,m['scope'],m['scope_id'])
     if d:
         if m['scope']=='dm':
             pair={(m['sender_kind'],m['sender_id']),(m['to_kind'],m['to_id'])}
             await manager.broadcast({'type':'message_updated','message':d},visible=lambda actor:(actor['kind'],actor['id']) in pair)
         else:
-            await manager.broadcast({'type':'message_updated','message':d},visible=visible_predicate(m['scope'],m['scope_id'],thread_owner=thread_owner,help_room_id=help_room_id,help_broadcast=help_broadcast))
+            await manager.broadcast({'type':'message_updated','message':d},visible=visible_predicate(m['scope'],m['scope_id'],thread_owner=thread_owner,help_room_id=help_room_id,help_event_id=help_event_id,help_scope=help_scope,priority=m['priority']))
     return d or {'ok':True}
 @app.get('/api/attachments/{aid}')
 def attachment_get(aid:int,authorization:str|None=Header(default=None)):
@@ -521,8 +536,9 @@ async def dm_send(x:DMIn,authorization:str|None=Header(default=None)):
     await manager.broadcast({'type':'dm_new','message':d},visible=lambda actor:(actor['kind'],actor['id']) in pair)
     return d
 
-def help_visible(room_id,broadcast=False):
-    if broadcast:return None
+def help_visible(room_id,event_id,scope):
+    if scope=='venue':return None
+    if scope=='event':return lambda actor:actor['kind']=='account' or actor['event_id']==event_id
     return lambda actor:actor['kind']=='account' or actor['room_id']==room_id
 @app.post('/api/help')
 async def help_create(x:HelpIn,authorization:str|None=Header(default=None)):
@@ -530,16 +546,18 @@ async def help_create(x:HelpIn,authorization:str|None=Header(default=None)):
     event_id,room_id=x.event_id,x.room_id
     if a['kind']=='operator':event_id,room_id=a['event_id'],a['room_id']
     if not room_id:raise HTTPException(400,'A room is required for a help request')
+    scope=x.scope if x.scope in ('room','event','venue') else 'room'
     with db() as c:
         rr=c.execute('SELECT name FROM rooms WHERE id=?',(room_id,)).fetchone()
         room_name=rr['name'] if rr else ''
-        hid=c.execute("INSERT INTO help_requests(event_id,room_id,room_name,requested_by,category,description,priority,status,created_at,broadcast) VALUES(?,?,?,?,?,?,?,'new',?,?)",(event_id,room_id,room_name,x.requested_by.strip() or a['display_name'],x.category,x.description,x.priority,now(),1 if x.broadcast else 0)).lastrowid
+        hid=c.execute("INSERT INTO help_requests(event_id,room_id,room_name,requested_by,category,description,priority,status,created_at,broadcast,scope) VALUES(?,?,?,?,?,?,?,'new',?,?,?)",(event_id,room_id,room_name,x.requested_by.strip() or a['display_name'],x.category,x.description,x.priority,now(),1 if scope=='venue' else 0,scope)).lastrowid
         hr=dict(c.execute('SELECT * FROM help_requests WHERE id=?',(hid,)).fetchone())
-        feed_body=('📢 All-call — ' if x.broadcast else '🆘 Help requested — ')+f"{x.category}: {x.description}"+(f' ({room_name})' if x.broadcast else '')
+        tag={'room':'🆘 Help requested — ','event':'📣 Event-wide help — ','venue':'📢 All-call — '}[scope]
+        feed_body=tag+f"{x.category}: {x.description}"+(f' ({room_name})' if scope!='room' else '')
         mid=c.execute('INSERT INTO messages(scope,scope_id,sender,sender_id,sender_kind,body,priority,created_at,help_request_id) VALUES(?,?,?,?,?,?,?,?,?)',('room',room_id,a['display_name'],a['id'],a['kind'],feed_body,'urgent',now(),hid)).lastrowid
         msg=message_dict(c,mid)
-    await manager.broadcast({'type':'help_new','request':hr},visible=help_visible(room_id,x.broadcast))
-    await manager.broadcast({'type':'message_new','message':msg},visible=visible_predicate('room',room_id) if not x.broadcast else None)
+    await manager.broadcast({'type':'help_new','request':hr},visible=help_visible(room_id,event_id,scope))
+    await manager.broadcast({'type':'message_new','message':msg},visible=help_visible(room_id,event_id,scope))
     return {'id':hid}
 @app.get('/api/help')
 def help_list(authorization:str|None=Header(default=None)):
@@ -554,7 +572,7 @@ async def help_update(hid:int,p:dict,authorization:str|None=Header(default=None)
         elif st:c.execute('UPDATE help_requests SET status=? WHERE id=?',(st,hid))
         if 'assigned_to' in p:c.execute('UPDATE help_requests SET assigned_to=? WHERE id=?',(p.get('assigned_to',''),hid))
         hr=dict(c.execute('SELECT * FROM help_requests WHERE id=?',(hid,)).fetchone())
-    await manager.broadcast({'type':'help_updated','request':hr},visible=help_visible(hr['room_id'],hr['broadcast']))
+    await manager.broadcast({'type':'help_updated','request':hr},visible=help_visible(hr['room_id'],hr['event_id'],hr['scope'] or 'room'))
     return {'ok':True}
 
 @app.post('/api/devices/register')
