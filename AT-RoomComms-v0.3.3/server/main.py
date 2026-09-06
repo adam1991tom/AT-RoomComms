@@ -542,6 +542,10 @@ async def help_create(x:HelpIn,authorization:str|None=Header(default=None)):
     await manager.broadcast({'type':'help_new','request':hr},visible=help_visible(room_id,x.broadcast))
     await manager.broadcast({'type':'message_new','message':msg},visible=visible_predicate('room',room_id) if not x.broadcast else None)
     return {'id':hid}
+@app.get('/api/help')
+def help_list(authorization:str|None=Header(default=None)):
+    require_auth(authorization)
+    with db() as c:return [dict(r) for r in c.execute('SELECT * FROM help_requests ORDER BY id DESC LIMIT 250')]
 @app.patch('/api/help/{hid}')
 async def help_update(hid:int,p:dict,authorization:str|None=Header(default=None)):
     a=require_auth(authorization);require_manager(a);st=p.get('status')

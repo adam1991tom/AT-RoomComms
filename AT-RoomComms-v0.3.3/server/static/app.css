@@ -198,6 +198,8 @@ header p{font-size:11px;color:var(--muted);margin:4px 0;font-family:var(--mono)}
   box-shadow:0 0 8px 0 var(--red);animation:pulseDot 1.2s ease-in-out infinite}
 @keyframes pulseHelpBg{0%,100%{background:rgba(255,77,106,.04)}50%{background:rgba(255,77,106,.18)}}
 .helpRow.new{border-left:2px solid var(--red);animation:pulseHelpBg 1.6s ease-in-out infinite}
+.helpRow.closed{opacity:.55}
+.helpRow.closed b,.helpRow.closed small{color:var(--muted)}
 .helpRow small{display:block}
 .helpBanner{border:1px solid rgba(255,77,106,.4);border-left:3px solid var(--red);margin-bottom:16px}
 .helpBanner.new{animation:pulseHelpBg 1.6s ease-in-out infinite}
