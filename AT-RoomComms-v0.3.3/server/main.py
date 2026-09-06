@@ -92,6 +92,15 @@ CREATE TABLE IF NOT EXISTS help_requests(id INTEGER PRIMARY KEY AUTOINCREMENT,ev
         if 'help_request_id' not in mcols:c.execute('ALTER TABLE messages ADD COLUMN help_request_id INTEGER')
         hcols=[r['name'] for r in c.execute('PRAGMA table_info(help_requests)')]
         if 'broadcast' not in hcols:c.execute('ALTER TABLE help_requests ADD COLUMN broadcast INTEGER DEFAULT 0')
+        rcols=[r['name'] for r in c.execute('PRAGMA table_info(rooms)')]
+        if 'event_id' not in rcols:
+            c.execute('ALTER TABLE rooms ADD COLUMN event_id INTEGER')
+            c.execute('ALTER TABLE rooms ADD COLUMN operator_name TEXT DEFAULT \'\'')
+            # Rooms used to be a shared library assigned to events via event_rooms.
+            # Fold that into a direct one-event ownership: each room now belongs to
+            # whichever event it was (most recently) assigned to.
+            for row in c.execute('SELECT room_id,event_id,operator_name FROM event_rooms er WHERE er.event_id=(SELECT MAX(event_id) FROM event_rooms WHERE room_id=er.room_id)'):
+                c.execute('UPDATE rooms SET event_id=?,operator_name=? WHERE id=?',(row['event_id'],row['operator_name'] or '',row['room_id']))
         c.execute("INSERT OR IGNORE INTO settings VALUES('venue_name','Harrogate Convention Centre')")
         c.execute("INSERT OR IGNORE INTO settings VALUES('control_centre_name','Speaker Preview')")
         c.execute("INSERT OR IGNORE INTO settings VALUES('attachment_limit_mb','25')")
@@ -112,7 +121,7 @@ class SetupIn(BaseModel):
     speaker_password:str
 class Login(BaseModel): username:str; password:str
 class EventIn(BaseModel): name:str; client:str=''; event_color:str='#8b5cf6'; starts_at:str=''; ends_at:str=''; event_status:str='scheduled'
-class RoomIn(BaseModel): name:str; short_name:str=''; current_status:str='closed'
+class RoomIn(BaseModel): name:str; short_name:str=''; current_status:str='closed'; event_id:int|None=None; operator_name:str=''
 class OperatorIn(BaseModel): name:str
 class AccountIn(BaseModel): username:str; password:str; display_name:str; role:str='speaker_preview'
 class PasswordIn(BaseModel): password:str
@@ -251,7 +260,7 @@ def operator_login_options():
         operators=[dict(r) for r in c.execute('SELECT id,name FROM operators WHERE active=1 ORDER BY name')]
         events=[]
         for e in c.execute('SELECT * FROM events WHERE archived=0 ORDER BY starts_at,name'):
-            rooms=[dict(r) for r in c.execute('SELECT r.id,r.name,r.short_name FROM event_rooms er JOIN rooms r ON r.id=er.room_id WHERE er.event_id=? AND r.enabled=1 ORDER BY r.name',(e['id'],))]
+            rooms=[dict(r) for r in c.execute('SELECT id,name,short_name FROM rooms WHERE event_id=? AND enabled=1 ORDER BY name',(e['id'],))]
             events.append({**dict(e),'rooms':rooms})
     return {'operators':operators,'events':events}
 @app.post('/api/operator/login')
@@ -262,8 +271,7 @@ def operator_login(x:OperatorLoginIn):
         op=c.execute('SELECT * FROM operators WHERE id=? AND active=1',(x.operator_id,)).fetchone()
         if not op:raise HTTPException(404,'Operator not found')
         if not c.execute('SELECT 1 FROM events WHERE id=? AND archived=0',(x.event_id,)).fetchone():raise HTTPException(404,'Event not found')
-        if not c.execute('SELECT 1 FROM rooms WHERE id=? AND enabled=1',(x.room_id,)).fetchone():raise HTTPException(404,'Room not found')
-        if not c.execute('SELECT 1 FROM event_rooms WHERE event_id=? AND room_id=?',(x.event_id,x.room_id)).fetchone():raise HTTPException(400,'That room is not assigned to that event')
+        if not c.execute('SELECT 1 FROM rooms WHERE id=? AND enabled=1 AND event_id=?',(x.room_id,x.event_id)).fetchone():raise HTTPException(400,'That room is not part of that event')
         token=secrets.token_urlsafe(32)
         c.execute('INSERT INTO operator_sessions(token,operator_id,event_id,room_id,device_role,device_name,created_at) VALUES(?,?,?,?,?,?,?)',(token,op['id'],x.event_id,x.room_id,x.device_role,x.device_name.strip(),now()))
     return {'token':token,'user':{'id':op['id'],'display_name':op['name'],'kind':'operator','room_id':x.room_id,'event_id':x.event_id,'device_role':x.device_role}}
@@ -280,10 +288,9 @@ def bootstrap(authorization:str|None=Header(default=None)):
         if a['kind']=='operator':
             room=c.execute('SELECT * FROM rooms WHERE id=?',(a['room_id'],)).fetchone()
             event=c.execute('SELECT * FROM events WHERE id=?',(a['event_id'],)).fetchone()
-            assignment=c.execute('SELECT * FROM event_rooms WHERE event_id=? AND room_id=?',(a['event_id'],a['room_id'])).fetchone()
             help_requests=[dict(r) for r in c.execute("SELECT * FROM help_requests WHERE (room_id=? OR broadcast=1) AND status NOT IN ('resolved','cancelled') ORDER BY id DESC",(a['room_id'],))]
-            return {'version':VERSION,'me':a,'settings':{'venue_name':setting(c,'venue_name'),'control_centre_name':setting(c,'control_centre_name'),'ui_theme':setting(c,'ui_theme','blue')},'room':dict(room) if room else None,'event':dict(event) if event else None,'assignment':dict(assignment) if assignment else None,'help_requests':help_requests}
-        return {'version':VERSION,'me':a,'settings':{r['key']:r['value'] for r in c.execute('SELECT * FROM settings')},'rooms':[dict(r) for r in c.execute('SELECT * FROM rooms WHERE enabled=1 ORDER BY name')],'events':[dict(r) for r in c.execute('SELECT * FROM events WHERE archived=0 ORDER BY starts_at,name')],'event_rooms':[dict(r) for r in c.execute('SELECT * FROM event_rooms')],'operators':[dict(r) for r in c.execute('SELECT * FROM operators WHERE active=1 ORDER BY name')],'devices':[dict(r) for r in c.execute('SELECT * FROM devices ORDER BY name')],'help_requests':[dict(r) for r in c.execute("SELECT * FROM help_requests WHERE status NOT IN ('resolved','cancelled') ORDER BY id DESC")]}
+            return {'version':VERSION,'me':a,'settings':{'venue_name':setting(c,'venue_name'),'control_centre_name':setting(c,'control_centre_name'),'ui_theme':setting(c,'ui_theme','blue')},'room':dict(room) if room else None,'event':dict(event) if event else None,'help_requests':help_requests}
+        return {'version':VERSION,'me':a,'settings':{r['key']:r['value'] for r in c.execute('SELECT * FROM settings')},'rooms':[dict(r) for r in c.execute('SELECT * FROM rooms WHERE enabled=1 ORDER BY event_id,name')],'events':[dict(r) for r in c.execute('SELECT * FROM events WHERE archived=0 ORDER BY starts_at,name')],'operators':[dict(r) for r in c.execute('SELECT * FROM operators WHERE active=1 ORDER BY name')],'devices':[dict(r) for r in c.execute('SELECT * FROM devices ORDER BY name')],'help_requests':[dict(r) for r in c.execute("SELECT * FROM help_requests WHERE status NOT IN ('resolved','cancelled') ORDER BY id DESC")]}
 
 @app.post('/api/events')
 def event_create(x:EventIn,authorization:str|None=Header(default=None)):
@@ -298,46 +305,35 @@ def event_update(eid:int,x:EventIn,authorization:str|None=Header(default=None)):
 @app.delete('/api/events/{eid}')
 def event_delete(eid:int,authorization:str|None=Header(default=None)):
     a=require_auth(authorization);require_manager(a)
-    with db() as c:c.execute('DELETE FROM event_rooms WHERE event_id=?',(eid,));c.execute('DELETE FROM events WHERE id=?',(eid,))
+    with db() as c:
+        c.execute('UPDATE rooms SET enabled=0 WHERE event_id=?',(eid,))
+        c.execute('DELETE FROM event_rooms WHERE event_id=?',(eid,))
+        c.execute('DELETE FROM events WHERE id=?',(eid,))
     return {'ok':True}
 
 @app.post('/api/rooms')
 def room_create(x:RoomIn,authorization:str|None=Header(default=None)):
     a=require_auth(authorization);require_manager(a)
+    if not x.event_id:raise HTTPException(400,'A room must belong to an event')
     with db() as c:
-        try:rid=c.execute('INSERT INTO rooms(name,short_name,current_status) VALUES(?,?,?)',(x.name.strip(),x.short_name.strip(),x.current_status)).lastrowid
+        if not c.execute('SELECT 1 FROM events WHERE id=? AND archived=0',(x.event_id,)).fetchone():raise HTTPException(404,'Event not found')
+        try:rid=c.execute('INSERT INTO rooms(name,short_name,current_status,event_id,operator_name) VALUES(?,?,?,?,?)',(x.name.strip(),x.short_name.strip(),x.current_status,x.event_id,x.operator_name.strip())).lastrowid
         except sqlite3.IntegrityError:raise HTTPException(409,'Room already exists')
     return {'id':rid}
 @app.patch('/api/rooms/{rid}')
 def room_update(rid:int,x:RoomIn,authorization:str|None=Header(default=None)):
     a=require_auth(authorization);require_manager(a)
-    with db() as c:c.execute('UPDATE rooms SET name=?,short_name=?,current_status=? WHERE id=?',(x.name.strip(),x.short_name.strip(),x.current_status,rid))
+    with db() as c:c.execute('UPDATE rooms SET name=?,short_name=?,current_status=?,operator_name=? WHERE id=?',(x.name.strip(),x.short_name.strip(),x.current_status,x.operator_name.strip(),rid))
     return {'ok':True}
 @app.delete('/api/rooms/{rid}')
 def room_delete(rid:int,authorization:str|None=Header(default=None)):
     a=require_auth(authorization);require_manager(a)
-    with db() as c:c.execute('DELETE FROM event_rooms WHERE room_id=?',(rid,));c.execute('UPDATE rooms SET enabled=0 WHERE id=?',(rid,))
+    with db() as c:c.execute('UPDATE rooms SET enabled=0 WHERE id=?',(rid,))
     return {'ok':True}
 @app.patch('/api/rooms/{rid}/status')
 def room_status(rid:int,p:dict,authorization:str|None=Header(default=None)):
     a=require_auth(authorization);require_manager(a)
     with db() as c:c.execute('UPDATE rooms SET current_status=? WHERE id=?',(p.get('status','closed'),rid))
-    return {'ok':True}
-
-@app.post('/api/events/{eid}/rooms/{rid}')
-def event_room_add(eid:int,rid:int,p:dict,authorization:str|None=Header(default=None)):
-    a=require_auth(authorization);require_manager(a)
-    with db() as c:c.execute('INSERT INTO event_rooms(event_id,room_id,operator_name) VALUES(?,?,?) ON CONFLICT(event_id,room_id) DO UPDATE SET operator_name=excluded.operator_name',(eid,rid,(p.get('operator_name') or '').strip()))
-    return {'ok':True}
-@app.patch('/api/events/{eid}/rooms/{rid}')
-def event_room_update(eid:int,rid:int,p:dict,authorization:str|None=Header(default=None)):
-    a=require_auth(authorization);require_manager(a)
-    with db() as c:c.execute('UPDATE event_rooms SET operator_name=? WHERE event_id=? AND room_id=?',((p.get('operator_name') or '').strip(),eid,rid))
-    return {'ok':True}
-@app.delete('/api/events/{eid}/rooms/{rid}')
-def event_room_delete(eid:int,rid:int,authorization:str|None=Header(default=None)):
-    a=require_auth(authorization);require_manager(a)
-    with db() as c:c.execute('DELETE FROM event_rooms WHERE event_id=? AND room_id=?',(eid,rid))
     return {'ok':True}
 
 @app.post('/api/operators')
