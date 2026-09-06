@@ -199,7 +199,10 @@ def visible_predicate(scope,scope_id,thread_owner=None,help_room_id=None,help_br
     return lambda actor:actor['kind']=='account'
 
 @app.get('/',response_class=HTMLResponse)
-def home():return HTMLResponse((Path(__file__).parent/'static'/'index.html').read_text(encoding='utf-8'))
+def home():
+    html=(Path(__file__).parent/'static'/'index.html').read_text(encoding='utf-8')
+    html=html.replace('app.css"','app.css?v='+VERSION+'"').replace('app.js"','app.js?v='+VERSION+'"')
+    return HTMLResponse(html)
 @app.get('/api/health')
 def health():return {'status':'ok','version':VERSION}
 @app.get('/api/setup/status')
