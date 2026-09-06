@@ -6,7 +6,7 @@ from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-VERSION='0.5.2'
+VERSION='0.6.0'
 DATA=Path(os.getenv('ROOMCOMMS_DATA','/data')); DB=DATA/'roomcomms.db'; UP=DATA/'uploads'
 DATA.mkdir(parents=True,exist_ok=True); UP.mkdir(exist_ok=True)
 app=FastAPI(title='AT RoomComms',version=VERSION)
@@ -25,6 +25,9 @@ class ConnectionManager:
             try:await ws.send_text(json.dumps(payload))
             except Exception:dead.append(ws)
         for ws in dead:self.conns.pop(ws,None)
+    def room_presence(self,room_id):
+        roles={a['device_role'] for a in self.conns.values() if a['kind']=='operator' and a['room_id']==room_id}
+        return {'main':'main' in roles,'backup':'backup' in roles}
 manager=ConnectionManager()
 
 def db():
@@ -79,6 +82,7 @@ CREATE TABLE IF NOT EXISTS devices(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEX
 CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY AUTOINCREMENT,scope TEXT,scope_id INTEGER,sender TEXT,body TEXT,priority TEXT,created_at TEXT);
 CREATE TABLE IF NOT EXISTS attachments(id INTEGER PRIMARY KEY AUTOINCREMENT,message_id INTEGER,original_name TEXT,stored_name TEXT,mime_type TEXT,size INTEGER);
 CREATE TABLE IF NOT EXISTS help_requests(id INTEGER PRIMARY KEY AUTOINCREMENT,event_id INTEGER,room_id INTEGER,room_name TEXT,requested_by TEXT,category TEXT,description TEXT,priority TEXT,status TEXT,assigned_to TEXT,created_at TEXT,acknowledged_at TEXT,resolved_at TEXT);
+CREATE TABLE IF NOT EXISTS issues(id INTEGER PRIMARY KEY AUTOINCREMENT,reporter_name TEXT,reporter_kind TEXT,category TEXT,description TEXT,status TEXT DEFAULT 'open',created_at TEXT,resolved_at TEXT);
 ''')
         cols=[r['name'] for r in c.execute('PRAGMA table_info(event_rooms)')]
         if 'operator_name' not in cols:c.execute("ALTER TABLE event_rooms ADD COLUMN operator_name TEXT DEFAULT ''")
@@ -132,6 +136,7 @@ class MessageIn(BaseModel): scope:str; scope_id:int|None=None; body:str=''; prio
 class MessageEdit(BaseModel): body:str
 class DeviceIn(BaseModel): name:str; role:str='general'; room_id:int|None=None; event_id:int|None=None; operator:str=''; app_version:str=''
 class HelpIn(BaseModel): event_id:int|None=None; room_id:int|None=None; requested_by:str=''; category:str; description:str; priority:str='important'; scope:str='room'
+class IssueIn(BaseModel): category:str; description:str
 class OperatorLoginIn(BaseModel): operator_id:int; event_id:int; room_id:int; device_role:str='main'; device_name:str=''
 class DMIn(BaseModel): to_kind:str; to_id:int; body:str
 
@@ -299,7 +304,9 @@ def bootstrap(authorization:str|None=Header(default=None)):
             event=c.execute('SELECT * FROM events WHERE id=?',(a['event_id'],)).fetchone()
             help_requests=[dict(r) for r in c.execute("SELECT * FROM help_requests WHERE (room_id=? OR scope='venue' OR (scope='event' AND event_id=?)) AND status NOT IN ('resolved','cancelled') ORDER BY id DESC",(a['room_id'],a['event_id']))]
             return {'version':VERSION,'me':a,'settings':{'venue_name':setting(c,'venue_name'),'control_centre_name':setting(c,'control_centre_name'),'ui_theme':setting(c,'ui_theme','blue')},'room':dict(room) if room else None,'event':dict(event) if event else None,'help_requests':help_requests}
-        return {'version':VERSION,'me':a,'settings':{r['key']:r['value'] for r in c.execute('SELECT * FROM settings')},'rooms':[dict(r) for r in c.execute('SELECT * FROM rooms WHERE enabled=1 ORDER BY event_id,name')],'events':[dict(r) for r in c.execute('SELECT * FROM events WHERE archived=0 ORDER BY starts_at,name')],'operators':[dict(r) for r in c.execute('SELECT * FROM operators WHERE active=1 ORDER BY name')],'devices':[dict(r) for r in c.execute('SELECT * FROM devices ORDER BY name')],'help_requests':[dict(r) for r in c.execute("SELECT * FROM help_requests WHERE status NOT IN ('resolved','cancelled') ORDER BY id DESC")]}
+        rooms=[dict(r) for r in c.execute('SELECT * FROM rooms WHERE enabled=1 ORDER BY event_id,name')]
+        presence={r['id']:manager.room_presence(r['id']) for r in rooms}
+        return {'version':VERSION,'me':a,'settings':{r['key']:r['value'] for r in c.execute('SELECT * FROM settings')},'rooms':rooms,'presence':presence,'events':[dict(r) for r in c.execute('SELECT * FROM events WHERE archived=0 ORDER BY starts_at,name')],'operators':[dict(r) for r in c.execute('SELECT * FROM operators WHERE active=1 ORDER BY name')],'devices':[dict(r) for r in c.execute('SELECT * FROM devices ORDER BY name')],'help_requests':[dict(r) for r in c.execute("SELECT * FROM help_requests WHERE status NOT IN ('resolved','cancelled') ORDER BY id DESC")]}
 
 @app.post('/api/events')
 def event_create(x:EventIn,authorization:str|None=Header(default=None)):
@@ -578,6 +585,30 @@ async def help_update(hid:int,p:dict,authorization:str|None=Header(default=None)
     await manager.broadcast({'type':'help_updated','request':hr},visible=help_visible(hr['room_id'],hr['event_id'],hr['scope'] or 'room'))
     return {'ok':True}
 
+@app.post('/api/issues')
+async def issue_create(x:IssueIn,authorization:str|None=Header(default=None)):
+    a=require_actor(authorization)
+    desc=x.description.strip()
+    if not desc:raise HTTPException(400,'Description is required')
+    with db() as c:
+        iid=c.execute("INSERT INTO issues(reporter_name,reporter_kind,category,description,status,created_at) VALUES(?,?,?,?,'open',?)",(a['display_name'],a['kind'],x.category,desc,now())).lastrowid
+        iss=dict(c.execute('SELECT * FROM issues WHERE id=?',(iid,)).fetchone())
+    await manager.broadcast({'type':'issue_new','issue':iss},visible=lambda actor:actor['kind']=='account')
+    return {'id':iid}
+@app.get('/api/issues')
+def issue_list(authorization:str|None=Header(default=None)):
+    require_actor(authorization)
+    with db() as c:return [dict(r) for r in c.execute('SELECT * FROM issues ORDER BY id DESC LIMIT 250')]
+@app.patch('/api/issues/{iid}')
+async def issue_update(iid:int,p:dict,authorization:str|None=Header(default=None)):
+    a=require_auth(authorization);require_manager(a);st=p.get('status')
+    with db() as c:
+        if st=='resolved':c.execute('UPDATE issues SET status=?,resolved_at=? WHERE id=?',(st,now(),iid))
+        elif st:c.execute('UPDATE issues SET status=? WHERE id=?',(st,iid))
+        iss=dict(c.execute('SELECT * FROM issues WHERE id=?',(iid,)).fetchone())
+    await manager.broadcast({'type':'issue_updated','issue':iss},visible=lambda actor:actor['kind']=='account')
+    return {'ok':True}
+
 @app.post('/api/devices/register')
 def device_register(x:DeviceIn):
     # Client device registration remains local-network friendly and does not require a Control Centre login.
@@ -597,10 +628,15 @@ async def websocket(w:WebSocket):
     if not actor:
         await w.close(code=4401);return
     await manager.connect(w,actor)
+    if actor['kind']=='operator':
+        await manager.broadcast({'type':'presence_updated','room_id':actor['room_id'],**manager.room_presence(actor['room_id'])},visible=lambda a:a['kind']=='account')
     try:
         while True:await w.receive_text()
     except WebSocketDisconnect:pass
-    finally:manager.disconnect(w)
+    finally:
+        manager.disconnect(w)
+        if actor['kind']=='operator':
+            await manager.broadcast({'type':'presence_updated','room_id':actor['room_id'],**manager.room_presence(actor['room_id'])},visible=lambda a:a['kind']=='account')
 
 async def cutoff_sweeper():
     while True:

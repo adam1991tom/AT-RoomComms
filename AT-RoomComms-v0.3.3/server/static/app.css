@@ -108,6 +108,10 @@ header p{font-size:11px;color:var(--muted);margin:4px 0;font-family:var(--mono)}
 .rehearsal.dot{background:var(--blue);color:var(--blue)}
 .setting_up.dot{background:var(--amber);color:var(--amber)}
 .technical_issue.dot,.help_requested.dot{background:var(--red);color:var(--red);animation:pulseDot 1.2s ease-in-out infinite}
+.presenceDot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-left:6px;background:#666;vertical-align:middle}
+.presenceDot.online-full{background:var(--green);box-shadow:0 0 6px 0 var(--green)}
+.presenceDot.online-partial{background:var(--amber);box-shadow:0 0 6px 0 var(--amber)}
+.presenceDot.offline{background:#555}
 
 .badge{border:1px solid var(--line-soft);border-radius:12px;padding:3px 8px;font-size:9px;font-family:var(--mono);letter-spacing:.03em}
 .operator{color:#d6b3ff;font-size:10px;font-family:var(--mono)}
