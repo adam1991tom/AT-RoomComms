@@ -1,4 +1,4 @@
-import os, sqlite3, hashlib, hmac, secrets, uuid
+import os, sqlite3, hashlib, hmac, secrets, uuid, json
 from pathlib import Path
 from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect, Header
@@ -6,13 +6,25 @@ from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-VERSION='0.3.3'
+VERSION='0.3.4'
 DATA=Path(os.getenv('ROOMCOMMS_DATA','/data')); DB=DATA/'roomcomms.db'; UP=DATA/'uploads'
 DATA.mkdir(parents=True,exist_ok=True); UP.mkdir(exist_ok=True)
 app=FastAPI(title='AT RoomComms',version=VERSION)
 app.mount('/static',StaticFiles(directory=Path(__file__).parent/'static'),name='static')
 
 def now(): return datetime.now(timezone.utc).isoformat()
+
+class ConnectionManager:
+    def __init__(self):self.conns=set()
+    async def connect(self,ws):await ws.accept();self.conns.add(ws)
+    def disconnect(self,ws):self.conns.discard(ws)
+    async def broadcast(self,payload):
+        dead=[]
+        for ws in self.conns:
+            try:await ws.send_text(json.dumps(payload))
+            except Exception:dead.append(ws)
+        for ws in dead:self.conns.discard(ws)
+manager=ConnectionManager()
 def db():
     c=sqlite3.connect(DB); c.row_factory=sqlite3.Row; c.execute('PRAGMA foreign_keys=ON'); return c
 
@@ -54,6 +66,10 @@ CREATE TABLE IF NOT EXISTS help_requests(id INTEGER PRIMARY KEY AUTOINCREMENT,ev
 ''')
         cols=[r['name'] for r in c.execute('PRAGMA table_info(event_rooms)')]
         if 'operator_name' not in cols:c.execute("ALTER TABLE event_rooms ADD COLUMN operator_name TEXT DEFAULT ''")
+        mcols=[r['name'] for r in c.execute('PRAGMA table_info(messages)')]
+        if 'sender_id' not in mcols:c.execute('ALTER TABLE messages ADD COLUMN sender_id INTEGER')
+        if 'edited_at' not in mcols:c.execute('ALTER TABLE messages ADD COLUMN edited_at TEXT')
+        if 'deleted_at' not in mcols:c.execute('ALTER TABLE messages ADD COLUMN deleted_at TEXT')
         c.execute("INSERT OR IGNORE INTO settings VALUES('venue_name','Harrogate Convention Centre')")
         c.execute("INSERT OR IGNORE INTO settings VALUES('control_centre_name','Speaker Preview')")
         c.execute("INSERT OR IGNORE INTO settings VALUES('attachment_limit_mb','25')")
@@ -77,16 +93,21 @@ class OperatorIn(BaseModel): name:str
 class AccountIn(BaseModel): username:str; password:str; display_name:str; role:str='speaker_preview'
 class PasswordIn(BaseModel): password:str
 class MessageIn(BaseModel): scope:str; scope_id:int|None=None; sender:str=''; body:str=''; priority:str='normal'
+class MessageEdit(BaseModel): body:str
 class DeviceIn(BaseModel): name:str; role:str='general'; room_id:int|None=None; event_id:int|None=None; operator:str=''; app_version:str=''
 class HelpIn(BaseModel): event_id:int|None=None; room_id:int|None=None; requested_by:str; category:str; description:str; priority:str='important'
+
+def account_for_token(token:str):
+    with db() as c:r=c.execute('SELECT a.id,a.username,a.display_name,a.role,a.active FROM sessions s JOIN accounts a ON a.id=s.account_id WHERE s.token=?',(token,)).fetchone()
+    if not r or not r['active']:return None
+    return dict(r)
 
 def require_auth(authorization:str|None):
     if not setup_complete():raise HTTPException(503,'First run setup required')
     if not authorization or not authorization.lower().startswith('bearer '):raise HTTPException(401,'Login required')
-    token=authorization.split(' ',1)[1].strip()
-    with db() as c:r=c.execute('SELECT a.id,a.username,a.display_name,a.role,a.active FROM sessions s JOIN accounts a ON a.id=s.account_id WHERE s.token=?',(token,)).fetchone()
-    if not r or not r['active']:raise HTTPException(401,'Session invalid')
-    return dict(r)
+    a=account_for_token(authorization.split(' ',1)[1].strip())
+    if not a:raise HTTPException(401,'Session invalid')
+    return a
 def require_manager(a):
     if a['role'] not in ('admin','speaker_preview'):raise HTTPException(403,'Manager permission required')
 def require_admin(a):
@@ -242,19 +263,52 @@ def settings_update(p:dict,authorization:str|None=Header(default=None)):
             if k in allowed:c.execute('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',(k,str(v)))
     return {'ok':True}
 
+def message_dict(c,mid):
+    r=c.execute('SELECT * FROM messages WHERE id=?',(mid,)).fetchone()
+    if not r:return None
+    d=dict(r);d['attachments']=[dict(x) for x in c.execute('SELECT * FROM attachments WHERE message_id=?',(mid,))]
+    return d
+
 @app.get('/api/messages')
 def messages(scope:str,scope_id:int|None=None,authorization:str|None=Header(default=None)):
     require_auth(authorization)
     with db() as c:
-        rows=c.execute("SELECT * FROM messages WHERE scope='venue' ORDER BY id DESC LIMIT 250") if scope=='venue' else c.execute('SELECT * FROM messages WHERE scope=? AND scope_id=? ORDER BY id DESC LIMIT 250',(scope,scope_id));out=[]
+        rows=c.execute("SELECT * FROM messages WHERE scope='venue' AND deleted_at IS NULL ORDER BY id DESC LIMIT 250") if scope=='venue' else c.execute('SELECT * FROM messages WHERE scope=? AND scope_id=? AND deleted_at IS NULL ORDER BY id DESC LIMIT 250',(scope,scope_id));out=[]
         for r in reversed(rows.fetchall()):
             d=dict(r);d['attachments']=[dict(x) for x in c.execute('SELECT * FROM attachments WHERE message_id=?',(r['id'],))];out.append(d)
         return out
 @app.post('/api/messages')
-def message_create(x:MessageIn,authorization:str|None=Header(default=None)):
+async def message_create(x:MessageIn,authorization:str|None=Header(default=None)):
     a=require_auth(authorization);sender=x.sender.strip() or a['display_name']
-    with db() as c:mid=c.execute('INSERT INTO messages(scope,scope_id,sender,body,priority,created_at) VALUES(?,?,?,?,?,?)',(x.scope,x.scope_id,sender,x.body,x.priority,now())).lastrowid
-    return {'id':mid}
+    with db() as c:
+        mid=c.execute('INSERT INTO messages(scope,scope_id,sender,sender_id,body,priority,created_at) VALUES(?,?,?,?,?,?,?)',(x.scope,x.scope_id,sender,a['id'],x.body,x.priority,now())).lastrowid
+        d=message_dict(c,mid)
+    await manager.broadcast({'type':'message_new','message':d})
+    return d
+@app.patch('/api/messages/{mid}')
+async def message_edit(mid:int,x:MessageEdit,authorization:str|None=Header(default=None)):
+    a=require_auth(authorization)
+    with db() as c:
+        m=c.execute('SELECT * FROM messages WHERE id=? AND deleted_at IS NULL',(mid,)).fetchone()
+        if not m:raise HTTPException(404,'Message not found')
+        if m['sender_id']!=a['id'] and a['role']!='admin':raise HTTPException(403,'You can only edit your own messages')
+        body=x.body.strip()
+        if not body:raise HTTPException(400,'Message cannot be empty')
+        c.execute('UPDATE messages SET body=?,edited_at=? WHERE id=?',(body,now(),mid))
+        d=message_dict(c,mid)
+    await manager.broadcast({'type':'message_updated','message':d})
+    return d
+@app.delete('/api/messages/{mid}')
+async def message_delete(mid:int,authorization:str|None=Header(default=None)):
+    a=require_auth(authorization)
+    with db() as c:
+        m=c.execute('SELECT * FROM messages WHERE id=? AND deleted_at IS NULL',(mid,)).fetchone()
+        if not m:raise HTTPException(404,'Message not found')
+        if m['sender_id']!=a['id'] and a['role']!='admin':raise HTTPException(403,'You can only delete your own messages')
+        c.execute('UPDATE messages SET deleted_at=? WHERE id=?',(now(),mid))
+        scope,scope_id=m['scope'],m['scope_id']
+    await manager.broadcast({'type':'message_deleted','id':mid,'scope':scope,'scope_id':scope_id})
+    return {'ok':True}
 @app.post('/api/messages/{mid}/attachments')
 async def attachment_add(mid:int,file:UploadFile=File(...),authorization:str|None=Header(default=None)):
     require_auth(authorization)
@@ -265,8 +319,11 @@ async def attachment_add(mid:int,file:UploadFile=File(...),authorization:str|Non
             size+=len(chunk)
             if size>lim*1024*1024:f.close();dest.unlink(missing_ok=True);raise HTTPException(413,f'{lim}MB limit')
             f.write(chunk)
-    with db() as c:c.execute('INSERT INTO attachments(message_id,original_name,stored_name,mime_type,size) VALUES(?,?,?,?,?)',(mid,file.filename or safe,stored,file.content_type or '',size))
-    return {'ok':True}
+    with db() as c:
+        c.execute('INSERT INTO attachments(message_id,original_name,stored_name,mime_type,size) VALUES(?,?,?,?,?)',(mid,file.filename or safe,stored,file.content_type or '',size))
+        d=message_dict(c,mid)
+    if d:await manager.broadcast({'type':'message_updated','message':d})
+    return d or {'ok':True}
 @app.get('/api/attachments/{aid}')
 def attachment_get(aid:int,authorization:str|None=Header(default=None)):
     require_auth(authorization)
@@ -303,7 +360,11 @@ def device_heartbeat(p:dict):
 
 @app.websocket('/ws')
 async def websocket(w:WebSocket):
-    await w.accept()
+    token=w.query_params.get('token','')
+    if not setup_complete() or not account_for_token(token):
+        await w.close(code=4401);return
+    await manager.connect(w)
     try:
         while True:await w.receive_text()
     except WebSocketDisconnect:pass
+    finally:manager.disconnect(w)

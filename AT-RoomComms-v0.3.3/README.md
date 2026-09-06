@@ -1,6 +1,19 @@
-# AT RoomComms v0.3.3
+# AT RoomComms v0.3.4
 
 AT RoomComms is a self-hosted live-event operations and room communications platform for managing events, rooms, operators, messages, help requests, and privileged Control Centre logins from a web interface.
+
+## What changed in v0.3.4
+
+The venue/event/room operations feeds ("chat") were overhauled:
+
+- **Live updates.** A WebSocket connection (`/ws`, token-authenticated) pushes new messages, edits, and deletions to every open feed instantly — no more reopening a room to see new messages. A connection indicator in the sidebar shows Live / Connecting / Reconnecting, and the client auto-reconnects with backoff if the socket drops.
+- **Chat-style layout.** Messages now render as bubbles, your own messages align right, others align left, and the feed auto-scrolls to the newest message.
+- **Priority colour coding.** Important/urgent/emergency messages get a visible pill and border colour instead of plain text, so an emergency message actually stands out.
+- **Edit and delete.** You can edit or delete your own messages (admins can edit/delete any message); edits show an "edited" marker and deletions are soft-deleted (kept in the database, hidden from the feed) rather than destroyed.
+- **Inline image previews** for image attachments instead of a bare filename link.
+- **Enter to send** in all three composers (room, event, venue).
+
+This required a small schema addition (`messages.sender_id`, `edited_at`, `deleted_at`), applied automatically via the existing migration-on-boot pattern — no manual DB changes needed on upgrade.
 
 ## What changed in v0.3.3
 
@@ -77,10 +90,8 @@ AT RoomComms supports:
 - Assign rooms to events
 - Assign an operator to each event-room combination
 - Change live room status
-- Venue-wide operations messages
-- Event operations messages
-- Room operations messages
-- File attachments
+- Venue-wide, event, and room operations feeds with live updates over WebSocket, priority colour coding, and message edit/delete
+- File attachments with inline image previews
 - Help requests
 - Acknowledge and resolve help requests
 
@@ -169,4 +180,4 @@ If an older RoomComms data volume is detected during first installation of the p
 
 ## Version
 
-Current release: **v0.3.3**
+Current release: **v0.3.4**
