@@ -168,6 +168,16 @@ header p{font-size:11px;color:var(--muted);margin:4px 0;font-family:var(--mono)}
 .priSelect{max-width:130px}
 .operatorMode .label{display:none}
 
+.navBadge{display:inline-block;min-width:16px;padding:1px 5px;border-radius:9px;background:var(--red);color:#fff;
+  font-family:var(--mono);font-size:9px;text-align:center;vertical-align:middle;margin-left:4px;
+  box-shadow:0 0 8px 0 var(--red);animation:pulseDot 1.2s ease-in-out infinite}
+@keyframes pulseHelpBg{0%,100%{background:rgba(255,77,106,.04)}50%{background:rgba(255,77,106,.18)}}
+.helpRow.new{border-left:2px solid var(--red);animation:pulseHelpBg 1.6s ease-in-out infinite}
+.helpRow small{display:block}
+.helpBanner{border:1px solid rgba(255,77,106,.4);border-left:3px solid var(--red);margin-bottom:16px}
+.helpBanner.new{animation:pulseHelpBg 1.6s ease-in-out infinite}
+.helpBanner small{color:var(--muted);display:block;margin-top:4px}
+
 @media(max-width:950px){
   #app{grid-template-columns:210px 1fr}
   .grid2{grid-template-columns:1fr}
