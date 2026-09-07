@@ -6,7 +6,7 @@ from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-VERSION='0.7.5'
+VERSION='0.7.6'
 DATA=Path(os.getenv('ROOMCOMMS_DATA','/data')); DB=DATA/'roomcomms.db'; UP=DATA/'uploads'
 DATA.mkdir(parents=True,exist_ok=True); UP.mkdir(exist_ok=True)
 app=FastAPI(title='AT RoomComms',version=VERSION)
@@ -226,7 +226,7 @@ def visible_predicate(scope,scope_id,thread_owner=None,help_room_id=None,help_ev
 def home():
     html=(Path(__file__).parent/'static'/'index.html').read_text(encoding='utf-8')
     html=html.replace('app.css"','app.css?v='+VERSION+'"').replace('app.js"','app.js?v='+VERSION+'"')
-    return HTMLResponse(html)
+    return HTMLResponse(html,headers={'Cache-Control':'no-store, must-revalidate'})
 @app.get('/api/health')
 def health():return {'status':'ok','version':VERSION}
 @app.get('/api/setup/status')
