@@ -209,7 +209,12 @@ internal sealed class MainForm : Form
         string device = Uri.EscapeDataString(Environment.MachineName.ToUpperInvariant());
         string appVersion = Uri.EscapeDataString(Program.AppVersion);
         string speaker = speakerPreview ? "&speaker=1" : string.Empty;
-        _webView.Source = new Uri($"{_serverUrl}/?device={device}&client=windows&clientVersion={appVersion}{speaker}");
+        // A unique query string on every navigation means the WebView2 profile's
+        // HTTP cache can never have a stored entry for this exact URL, so every
+        // click/launch is guaranteed to fetch the current page - no reliance on
+        // the server's cache headers or on clearing a persistent cache by hand.
+        string cacheBust = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString();
+        _webView.Source = new Uri($"{_serverUrl}/?device={device}&client=windows&clientVersion={appVersion}{speaker}&_={cacheBust}");
     }
 
     private void OpenSpeakerPreview() => NavigateClient(speakerPreview: true);
