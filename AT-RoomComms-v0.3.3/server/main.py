@@ -6,7 +6,7 @@ from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-VERSION='0.6.2'
+VERSION='0.7.0'
 DATA=Path(os.getenv('ROOMCOMMS_DATA','/data')); DB=DATA/'roomcomms.db'; UP=DATA/'uploads'
 DATA.mkdir(parents=True,exist_ok=True); UP.mkdir(exist_ok=True)
 app=FastAPI(title='AT RoomComms',version=VERSION)
@@ -99,6 +99,9 @@ CREATE TABLE IF NOT EXISTS issues(id INTEGER PRIMARY KEY AUTOINCREMENT,reporter_
         if 'scope' not in hcols:
             c.execute("ALTER TABLE help_requests ADD COLUMN scope TEXT DEFAULT 'room'")
             c.execute("UPDATE help_requests SET scope='venue' WHERE broadcast=1")
+        dcols=[r['name'] for r in c.execute('PRAGMA table_info(devices)')]
+        if 'presenting' not in dcols:c.execute('ALTER TABLE devices ADD COLUMN presenting INTEGER DEFAULT 0')
+        if 'uptime_seconds' not in dcols:c.execute('ALTER TABLE devices ADD COLUMN uptime_seconds INTEGER DEFAULT 0')
         rcols=[r['name'] for r in c.execute('PRAGMA table_info(rooms)')]
         if 'event_id' not in rcols:
             c.execute('ALTER TABLE rooms ADD COLUMN event_id INTEGER')
@@ -610,13 +613,24 @@ async def issue_update(iid:int,p:dict,authorization:str|None=Header(default=None
     return {'ok':True}
 
 @app.post('/api/devices/register')
-def device_register(x:DeviceIn):
+async def device_register(x:DeviceIn):
     # Client device registration remains local-network friendly and does not require a Control Centre login.
-    with db() as c:c.execute("INSERT INTO devices(name,role,room_id,event_id,operator,online_status,last_heartbeat,app_version) VALUES(?,?,?,?,?,'online',?,?) ON CONFLICT(name) DO UPDATE SET role=excluded.role,room_id=excluded.room_id,event_id=excluded.event_id,operator=excluded.operator,online_status='online',last_heartbeat=excluded.last_heartbeat,app_version=excluded.app_version",(x.name,x.role,x.room_id,x.event_id,x.operator,now(),x.app_version))
+    with db() as c:
+        c.execute("INSERT INTO devices(name,role,room_id,event_id,operator,online_status,last_heartbeat,app_version) VALUES(?,?,?,?,?,'online',?,?) ON CONFLICT(name) DO UPDATE SET role=excluded.role,room_id=excluded.room_id,event_id=excluded.event_id,operator=excluded.operator,online_status='online',last_heartbeat=excluded.last_heartbeat,app_version=excluded.app_version",(x.name,x.role,x.room_id,x.event_id,x.operator,now(),x.app_version))
+        d=dict(c.execute('SELECT * FROM devices WHERE name=?',(x.name,)).fetchone())
+    await manager.broadcast({'type':'device_updated','device':d},visible=lambda actor:actor['kind']=='account')
     return {'ok':True}
 @app.post('/api/devices/heartbeat')
-def device_heartbeat(p:dict):
-    with db() as c:c.execute("UPDATE devices SET online_status='online',last_heartbeat=? WHERE name=?",(now(),p.get('name','')))
+async def device_heartbeat(p:dict):
+    name=p.get('name','')
+    with db() as c:
+        if 'presenting' in p or 'uptime_seconds' in p:
+            c.execute("UPDATE devices SET online_status='online',last_heartbeat=?,presenting=?,uptime_seconds=? WHERE name=?",(now(),1 if p.get('presenting') else 0,int(p.get('uptime_seconds') or 0),name))
+        else:
+            c.execute("UPDATE devices SET online_status='online',last_heartbeat=? WHERE name=?",(now(),name))
+        row=c.execute('SELECT * FROM devices WHERE name=?',(name,)).fetchone()
+        d=dict(row) if row else None
+    if d:await manager.broadcast({'type':'device_updated','device':d},visible=lambda actor:actor['kind']=='account')
     return {'ok':True}
 
 @app.websocket('/ws')

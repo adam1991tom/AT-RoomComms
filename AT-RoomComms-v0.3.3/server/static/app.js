@@ -73,12 +73,19 @@ function notifyNative(title,body,priority){
     if(S.d?.me?.kind==='operator'&&S.d.me.device_role==='main')return;
     try{window.chrome.webview.postMessage({type:'notification',title,body,priority})}catch{}
 }
+let CLIENT_TELEMETRY=null;
 function registerWindowsDevice(){
     const device=CLIENT_PARAMS.get('device');
     if(!device)return;
+    if(IS_WINDOWS_CLIENT){
+        window.chrome.webview.addEventListener('message',e=>{
+            const d=e.data;
+            if(d&&d.type==='telemetry')CLIENT_TELEMETRY={presenting:!!d.presenting,uptime_seconds:d.uptimeSeconds|0};
+        });
+    }
     const register=()=>fetch('/api/devices/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:device,role:IS_WINDOWS_CLIENT?'windows-client':'general',app_version:CLIENT_PARAMS.get('clientVersion')||''})}).catch(()=>{});
     register();
-    setInterval(()=>fetch('/api/devices/heartbeat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:device})}).catch(()=>{}),300000);
+    setInterval(()=>fetch('/api/devices/heartbeat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:device,...(CLIENT_TELEMETRY||{})})}).catch(()=>{}),60000);
 }
 async function start(){registerWindowsDevice();try{const s=await fetch('/api/setup/status',{cache:'no-store'}).then(r=>r.json());applyTheme(s.theme);if(s.needs_setup){token='';localStorage.removeItem('rc_token');showOnly('setup');return}if(token){await load();return}showOnly('login')}catch(e){showOnly('login')}}
 $('#setupForm').addEventListener('submit',async e=>{e.preventDefault();$('#setupError').textContent='';const ap=$('#setupAdminPass').value,sp=$('#setupSpeakerPass').value;if(ap!==$('#setupAdminConfirm').value)return $('#setupError').textContent='Administrator passwords do not match.';if(sp!==$('#setupSpeakerConfirm').value)return $('#setupError').textContent='Speaker Preview passwords do not match.';try{const r=await api('/api/setup/complete',{method:'POST',body:JSON.stringify({venue_name:$('#setupVenue').value,control_centre_name:$('#setupControl').value,admin_display_name:$('#setupAdminName').value,admin_username:$('#setupAdminUser').value,admin_password:ap,speaker_display_name:$('#setupSpeakerName').value,speaker_username:$('#setupSpeakerUser').value,speaker_password:sp})});token=r.token;localStorage.setItem('rc_token',token);await load()}catch(err){$('#setupError').textContent=err.message}});
@@ -132,6 +139,14 @@ function wsHandle(msg){
             if(i>-1)S.d.rooms[i]=msg.room;else S.d.rooms.push(msg.room);
             renderChrome();
             S.rerender&&S.rerender();
+        }
+        return;
+    }
+    if(msg.type==='device_updated'){
+        if(S.d.devices){
+            const i=S.d.devices.findIndex(d=>d.name===msg.device.name);
+            if(i>-1)S.d.devices[i]=msg.device;else S.d.devices.push(msg.device);
+            if(S.view==='devices')devicesPage();
         }
         return;
     }
@@ -342,6 +357,18 @@ async function issueUpdate(id,status){await api(`/api/issues/${id}`,{method:'PAT
 window.issueUpdate=issueUpdate;
 function reportIssue(){modal(`<h2>🐞 Report Issue</h2><div class="form"><label>Category<select id="issCat"><option>App bug</option><option>Display / layout</option><option>Notifications</option><option>Login / access</option><option>Performance</option><option>Other</option></select></label><label>Describe what happened<textarea id="issDesc" placeholder="What did you expect, what happened instead?"></textarea></label><button class="btn danger" id="issSend">Send Report</button></div>`);$('#issSend').onclick=async()=>{const v=$('#issDesc').value.trim();if(!v)return alert('Please describe the issue');await api('/api/issues',{method:'POST',body:JSON.stringify({category:$('#issCat').value,description:v})});closeModal();if(S.d.me.kind==='account')issuesPage()}}
 window.reportIssue=reportIssue;
+function fmtDuration(sec){sec=sec|0;if(sec<60)return sec+'s';const m=Math.floor(sec/60)%60,h=Math.floor(sec/3600);return h>0?`${h}h ${m}m`:`${m}m`}
+function fmtAgo(iso){if(!iso)return'never';const s=(Date.now()-new Date(iso).getTime())/1000;if(s<10)return'just now';if(s<60)return Math.floor(s)+'s ago';if(s<3600)return Math.floor(s/60)+'m ago';if(s<86400)return Math.floor(s/3600)+'h ago';return Math.floor(s/86400)+'d ago'}
+function devicesPage(){
+    if(S.d.me.role!=='admin')return;
+    S.view='devices';S.rerender=devicesPage;title('Devices','PCs running the AT RoomComms client');
+    const list=(S.d.devices||[]).slice().sort((a,b)=>(b.last_heartbeat||'').localeCompare(a.last_heartbeat||''));
+    $('#content').innerHTML=`<div class="card">${list.map(d=>{
+        const stale=(Date.now()-new Date(d.last_heartbeat||0).getTime())>360000;
+        return `<div class="listRow"><span class="dot ${stale?'':'ready'}"></span><b>${esc(d.name)}</b><small>${esc(d.role||'')}${d.operator?` · ${esc(d.operator)}`:''}</small>${d.presenting?'<span class="badge">🖥️ Presenting</span>':''}<small>v${esc(d.app_version||'?')}</small><small>Uptime ${fmtDuration(d.uptime_seconds)}</small><small>${fmtAgo(d.last_heartbeat)}</small></div>`;
+    }).join('')||'<div class="body">No devices have reported in yet.</div>'}</div>`;
+}
+window.devicesPage=devicesPage;
 function helpRequest(eid,rid){modal(`<h2>Request Help</h2><div class="form"><label>Category<select id="helpCat"><option>Presentation</option><option>Video</option><option>Audio</option><option>Lighting</option><option>Network</option><option>Room Setup</option><option>Speaker Support</option><option>Other</option></select></label><label>Description<textarea id="helpDesc"></textarea></label><label>Send to<select id="helpScope"><option value="room">Just this room — Control Centre only</option><option value="event">Everywhere on this event — every room in it</option><option value="venue">Everywhere in the venue — any available technician</option></select></label><button class="btn danger" id="helpSend">Send Help Request</button></div>`);$('#helpSend').onclick=async()=>{await api('/api/help',{method:'POST',body:JSON.stringify({event_id:eid,room_id:rid,requested_by:S.d.me.display_name,category:$('#helpCat').value,description:$('#helpDesc').value,priority:'important',scope:$('#helpScope').value})});closeModal();await refresh();if(S.d.me.kind!=='operator')openRoom(eid,rid)}}window.helpRequest=helpRequest;
 function emergencyAlert(eid,rid){modal(`<h2>🚨 Emergency</h2><p class="notice">This alerts every room and Control Centre across the whole venue immediately — no matter what.</p><div class="form"><label>What's happening?<textarea id="emgDesc" placeholder="Briefly describe the emergency"></textarea></label><button class="btn danger" id="emgSend">Send Emergency Alert</button></div>`);$('#emgSend').onclick=async()=>{const v=$('#emgDesc').value.trim()||'Emergency — assistance needed';const m=await api('/api/messages',{method:'POST',body:JSON.stringify({scope:'room',scope_id:rid,body:v,priority:'emergency'})});closeModal();feedAppend(m)}}window.emergencyAlert=emergencyAlert;
-$$('.nav[data-view]').forEach(b=>b.onclick=()=>{const v=b.dataset.view;$$('.nav').forEach(x=>x.classList.remove('active'));b.classList.add('active');({control,venue,manage,operators,help:helpPage,dm:dmPage,settings,accounts,room:renderOperatorApp,issues:issuesPage}[v]||control)()});$('#modal').onclick=e=>{if(e.target===$('#modal'))closeModal()};start();
+$$('.nav[data-view]').forEach(b=>b.onclick=()=>{const v=b.dataset.view;$$('.nav').forEach(x=>x.classList.remove('active'));b.classList.add('active');({control,venue,manage,operators,help:helpPage,dm:dmPage,settings,accounts,room:renderOperatorApp,issues:issuesPage,devices:devicesPage}[v]||control)()});$('#modal').onclick=e=>{if(e.target===$('#modal'))closeModal()};start();
