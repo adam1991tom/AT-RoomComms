@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
 using System.Text.Json.Serialization;
 
 namespace ATRoomComms.Client;
@@ -40,9 +41,26 @@ internal static class Updater
                 a => a.Name.EndsWith(".msi", StringComparison.OrdinalIgnoreCase));
             if (asset is null) return;
 
+            GitHubAsset? shaAsset = latest.Assets?.FirstOrDefault(
+                a => a.Name.Equals(asset.Name + ".sha256", StringComparison.OrdinalIgnoreCase));
+            if (shaAsset is null)
+            {
+                onStatus?.Invoke("Update skipped - release is missing its checksum file.");
+                return;
+            }
+
             onStatus?.Invoke($"Downloading AT RoomComms v{latestVersion}…");
             string tempMsi = Path.Combine(Path.GetTempPath(), asset.Name);
             byte[] bytes = await http.GetByteArrayAsync(asset.BrowserDownloadUrl);
+
+            string expectedHash = (await http.GetStringAsync(shaAsset.BrowserDownloadUrl)).Trim();
+            string actualHash = Convert.ToHexString(SHA256.HashData(bytes));
+            if (!string.Equals(expectedHash, actualHash, StringComparison.OrdinalIgnoreCase))
+            {
+                onStatus?.Invoke("Update aborted - downloaded file failed checksum verification.");
+                return;
+            }
+
             await File.WriteAllBytesAsync(tempMsi, bytes);
 
             onStatus?.Invoke($"Installing AT RoomComms v{latestVersion}…");
