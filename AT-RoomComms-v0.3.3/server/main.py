@@ -6,7 +6,7 @@ from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-VERSION='0.7.7'
+VERSION='0.8.0'
 DATA=Path(os.getenv('ROOMCOMMS_DATA','/data')); DB=DATA/'roomcomms.db'; UP=DATA/'uploads'
 DATA.mkdir(parents=True,exist_ok=True); UP.mkdir(exist_ok=True)
 app=FastAPI(title='AT RoomComms',version=VERSION)
@@ -332,6 +332,28 @@ def event_update(eid:int,x:EventIn,authorization:str|None=Header(default=None)):
     a=require_auth(authorization);require_manager(a)
     with db() as c:c.execute('UPDATE events SET name=?,client=?,event_color=?,starts_at=?,ends_at=?,event_status=? WHERE id=?',(x.name.strip(),x.client.strip(),x.event_color,x.starts_at,x.ends_at,x.event_status,eid))
     return {'ok':True}
+@app.get('/api/events/{eid}/report')
+def event_report(eid:int,authorization:str|None=Header(default=None)):
+    a=require_auth(authorization);require_manager(a)
+    with db() as c:
+        event=c.execute('SELECT * FROM events WHERE id=?',(eid,)).fetchone()
+        if not event:raise HTTPException(404,'Event not found')
+        rooms=[dict(r) for r in c.execute('SELECT * FROM rooms WHERE event_id=? ORDER BY name',(eid,))]
+        room_ids=[r['id'] for r in rooms]
+        help_requests=[dict(r) for r in c.execute('SELECT * FROM help_requests WHERE event_id=? ORDER BY id',(eid,))]
+        emergencies=[]
+        msg_counts={};activity={}
+        if room_ids:
+            ph=','.join('?'*len(room_ids))
+            for r in c.execute(f"SELECT scope_id,COUNT(*) cnt,MIN(created_at) first_at,MAX(created_at) last_at FROM messages WHERE scope='room' AND scope_id IN ({ph}) AND deleted_at IS NULL GROUP BY scope_id",room_ids):
+                msg_counts[r['scope_id']]=r['cnt'];activity[r['scope_id']]={'first':r['first_at'],'last':r['last_at']}
+            emergencies=[dict(r) for r in c.execute(f"SELECT * FROM messages WHERE scope='room' AND scope_id IN ({ph}) AND priority='emergency' AND deleted_at IS NULL ORDER BY id",room_ids)]
+        for r in rooms:
+            r['message_count']=msg_counts.get(r['id'],0)
+            r['first_activity']=activity.get(r['id'],{}).get('first')
+            r['last_activity']=activity.get(r['id'],{}).get('last')
+    return {'event':dict(event),'rooms':rooms,'help_requests':help_requests,'emergencies':emergencies}
+
 @app.delete('/api/events/{eid}')
 def event_delete(eid:int,authorization:str|None=Header(default=None)):
     a=require_auth(authorization);require_manager(a)
