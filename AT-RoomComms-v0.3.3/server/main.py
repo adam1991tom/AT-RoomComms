@@ -1,13 +1,20 @@
 import os, sqlite3, hashlib, hmac, secrets, uuid, json, asyncio
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-from fastapi import FastAPI, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect, Header
+from fastapi import FastAPI, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect, Header, Response
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from cryptography.fernet import Fernet, InvalidToken
+from io import BytesIO
+from xml.sax.saxutils import escape as pdf_esc
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 
-VERSION='0.9.0'
+VERSION='0.9.1'
 DATA=Path(os.getenv('ROOMCOMMS_DATA','/data')); DB=DATA/'roomcomms.db'; UP=DATA/'uploads'
 DATA.mkdir(parents=True,exist_ok=True); UP.mkdir(exist_ok=True)
 KEY_FILE=DATA/'.encryption_key'
@@ -346,9 +353,63 @@ def event_update(eid:int,x:EventIn,authorization:str|None=Header(default=None)):
     a=require_auth(authorization);require_manager(a)
     with db() as c:c.execute('UPDATE events SET name=?,client=?,event_color=?,starts_at=?,ends_at=?,event_status=? WHERE id=?',(x.name.strip(),x.client.strip(),x.event_color,x.starts_at,x.ends_at,x.event_status,eid))
     return {'ok':True}
-@app.get('/api/events/{eid}/report')
-def event_report(eid:int,authorization:str|None=Header(default=None)):
-    a=require_auth(authorization);require_manager(a)
+def render_event_report_pdf(r):
+    styles=getSampleStyleSheet()
+    title_style=ParagraphStyle('RCTitle',parent=styles['Title'],textColor=colors.HexColor('#1ea0dc'))
+    h2=ParagraphStyle('RCH2',parent=styles['Heading2'],spaceBefore=14,textColor=colors.HexColor('#0c6e9c'))
+    body=styles['BodyText']
+    small=ParagraphStyle('RCSmall',parent=styles['BodyText'],fontSize=8,leading=10)
+    buf=BytesIO()
+    doc=SimpleDocTemplate(buf,pagesize=A4,topMargin=18*mm,bottomMargin=16*mm,leftMargin=16*mm,rightMargin=16*mm,title=f"{r['event']['name']} - Event Report")
+    e=r['event']
+    story=[Paragraph('AT RoomComms — Event Report',title_style),Spacer(1,4*mm),
+        Paragraph(pdf_esc(e['name'] or 'Event'),styles['Heading1']),
+        Paragraph(f"{pdf_esc(e.get('client') or 'No client')} &nbsp;·&nbsp; {pdf_esc(e.get('event_status') or '')} &nbsp;·&nbsp; {pdf_esc(e.get('starts_at') or '')} → {pdf_esc(e.get('ends_at') or '')}",body),
+        Spacer(1,6*mm)]
+    total_msgs=sum(x['message_count'] for x in r['rooms'])
+    summary=Table([['Rooms','Messages','Help Requests','Emergency Alerts'],
+        [str(len(r['rooms'])),str(total_msgs),str(len(r['help_requests'])),str(len(r['emergencies']))]],
+        colWidths=[42*mm]*4)
+    summary.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#0c6e9c')),('TEXTCOLOR',(0,0),(-1,0),colors.white),
+        ('FONTSIZE',(0,0),(-1,-1),9),('ALIGN',(0,0),(-1,-1),'CENTER'),('GRID',(0,0),(-1,-1),0.5,colors.HexColor('#cccccc')),
+        ('BOTTOMPADDING',(0,0),(-1,-1),6),('TOPPADDING',(0,0),(-1,-1),6)]))
+    story+= [summary, Paragraph('Rooms',h2)]
+    room_rows=[['Room','Operator','Messages','First activity','Last activity']]
+    for x in r['rooms']:
+        room_rows.append([x['name'],x.get('operator_name') or 'Unassigned',str(x['message_count']),x.get('first_activity') or '—',x.get('last_activity') or '—'])
+    rt=Table(room_rows,colWidths=[32*mm,32*mm,20*mm,42*mm,42*mm],repeatRows=1)
+    rt.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#eef6fb')),('FONTSIZE',(0,0),(-1,-1),8),
+        ('GRID',(0,0),(-1,-1),0.5,colors.HexColor('#dddddd')),('VALIGN',(0,0),(-1,-1),'MIDDLE'),
+        ('BOTTOMPADDING',(0,0),(-1,-1),4),('TOPPADDING',(0,0),(-1,-1),4)]))
+    story.append(rt)
+    story.append(Paragraph('Help Requests',h2))
+    if r['help_requests']:
+        hr_rows=[['Room','Category','Description','Status']]
+        for h in r['help_requests']:
+            hr_rows.append([h.get('room_name') or 'Room',h.get('category') or '',Paragraph(pdf_esc(h.get('description') or ''),small),h.get('status') or ''])
+        ht=Table(hr_rows,colWidths=[28*mm,28*mm,80*mm,32*mm],repeatRows=1)
+        ht.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#eef6fb')),('FONTSIZE',(0,0),(-1,-1),8),
+            ('GRID',(0,0),(-1,-1),0.5,colors.HexColor('#dddddd')),('VALIGN',(0,0),(-1,-1),'TOP'),
+            ('BOTTOMPADDING',(0,0),(-1,-1),4),('TOPPADDING',(0,0),(-1,-1),4)]))
+        story.append(ht)
+    else:
+        story.append(Paragraph('No help requests were raised.',body))
+    story.append(Paragraph('Emergency Alerts',h2))
+    if r['emergencies']:
+        em_rows=[['Sender','Message','Time']]
+        for m in r['emergencies']:
+            em_rows.append([m.get('sender') or '',Paragraph(pdf_esc(m.get('body') or ''),small),m.get('created_at') or ''])
+        et=Table(em_rows,colWidths=[32*mm,100*mm,36*mm],repeatRows=1)
+        et.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#fdeaea')),('FONTSIZE',(0,0),(-1,-1),8),
+            ('GRID',(0,0),(-1,-1),0.5,colors.HexColor('#dddddd')),('VALIGN',(0,0),(-1,-1),'TOP'),
+            ('BOTTOMPADDING',(0,0),(-1,-1),4),('TOPPADDING',(0,0),(-1,-1),4)]))
+        story.append(et)
+    else:
+        story.append(Paragraph('No emergency alerts were raised.',body))
+    doc.build(story)
+    return buf.getvalue()
+
+def _event_report_data(eid):
     with db() as c:
         event=c.execute('SELECT * FROM events WHERE id=?',(eid,)).fetchone()
         if not event:raise HTTPException(404,'Event not found')
@@ -368,6 +429,19 @@ def event_report(eid:int,authorization:str|None=Header(default=None)):
             r['first_activity']=activity.get(r['id'],{}).get('first')
             r['last_activity']=activity.get(r['id'],{}).get('last')
     return {'event':dict(event),'rooms':rooms,'help_requests':help_requests,'emergencies':emergencies}
+
+@app.get('/api/events/{eid}/report')
+def event_report(eid:int,authorization:str|None=Header(default=None)):
+    a=require_auth(authorization);require_manager(a)
+    return _event_report_data(eid)
+
+@app.get('/api/events/{eid}/report.pdf')
+def event_report_pdf(eid:int,authorization:str|None=Header(default=None)):
+    a=require_auth(authorization);require_manager(a)
+    r=_event_report_data(eid)
+    pdf=render_event_report_pdf(r)
+    fname=''.join(ch for ch in (r['event']['name'] or 'event') if ch.isalnum() or ch in '_- ').strip().replace(' ','_') or 'event'
+    return Response(content=pdf,media_type='application/pdf',headers={'Content-Disposition':f'attachment; filename="{fname}_report.pdf"'})
 
 @app.delete('/api/events/{eid}')
 def event_delete(eid:int,authorization:str|None=Header(default=None)):

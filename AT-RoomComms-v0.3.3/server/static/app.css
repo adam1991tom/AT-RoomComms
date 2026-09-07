@@ -91,6 +91,9 @@ header p{font-size:11px;color:var(--muted);margin:4px 0;font-family:var(--mono)}
 
 #content{padding:38px 24px;max-width:1500px}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.roomGrid{display:grid;grid-template-columns:7fr 3fr;gap:16px}
+.dmGrid{display:grid;grid-template-columns:3fr 7fr;gap:16px}
+@media(max-width:900px){.roomGrid,.dmGrid{grid-template-columns:1fr}}
 .card{background:var(--panel);backdrop-filter:blur(12px);border:1px solid var(--line-soft);border-radius:13px;
   overflow:hidden;box-shadow:0 12px 40px -20px #000;animation:fadeUp .2s ease-out}
 .cardHead{padding:16px;border-bottom:1px solid var(--line-soft);display:flex;justify-content:space-between;gap:10px;align-items:center}
