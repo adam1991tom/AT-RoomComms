@@ -4,7 +4,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$Version = "0.2.0"
+$Version = "0.3.0"
 $Root = Split-Path $PSScriptRoot -Parent
 $Project = Join-Path $Root "src\ATRoomComms.Client\ATRoomComms.Client.csproj"
 $Publish = Join-Path $PSScriptRoot "Publish"

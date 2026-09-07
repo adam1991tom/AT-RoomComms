@@ -66,7 +66,21 @@ function applyTheme(theme){
     $$('.brandIcon').forEach(img=>img.src=href);
     const fav=document.querySelector('link[rel="icon"]');if(fav){fav.href=href;fav.dataset.base=href}
 }
-async function start(){try{const s=await fetch('/api/setup/status',{cache:'no-store'}).then(r=>r.json());applyTheme(s.theme);if(s.needs_setup){token='';localStorage.removeItem('rc_token');showOnly('setup');return}if(token){await load();return}showOnly('login')}catch(e){showOnly('login')}}
+const CLIENT_PARAMS=new URLSearchParams(location.search);
+const IS_WINDOWS_CLIENT=CLIENT_PARAMS.get('client')==='windows'&&!!window.chrome?.webview;
+function notifyNative(title,body,priority){
+    if(!IS_WINDOWS_CLIENT)return;
+    if(S.d?.me?.kind==='operator'&&S.d.me.device_role==='main')return;
+    try{window.chrome.webview.postMessage({type:'notification',title,body,priority})}catch{}
+}
+function registerWindowsDevice(){
+    const device=CLIENT_PARAMS.get('device');
+    if(!device)return;
+    const register=()=>fetch('/api/devices/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:device,role:IS_WINDOWS_CLIENT?'windows-client':'general',app_version:CLIENT_PARAMS.get('clientVersion')||''})}).catch(()=>{});
+    register();
+    setInterval(()=>fetch('/api/devices/heartbeat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:device})}).catch(()=>{}),300000);
+}
+async function start(){registerWindowsDevice();try{const s=await fetch('/api/setup/status',{cache:'no-store'}).then(r=>r.json());applyTheme(s.theme);if(s.needs_setup){token='';localStorage.removeItem('rc_token');showOnly('setup');return}if(token){await load();return}showOnly('login')}catch(e){showOnly('login')}}
 $('#setupForm').addEventListener('submit',async e=>{e.preventDefault();$('#setupError').textContent='';const ap=$('#setupAdminPass').value,sp=$('#setupSpeakerPass').value;if(ap!==$('#setupAdminConfirm').value)return $('#setupError').textContent='Administrator passwords do not match.';if(sp!==$('#setupSpeakerConfirm').value)return $('#setupError').textContent='Speaker Preview passwords do not match.';try{const r=await api('/api/setup/complete',{method:'POST',body:JSON.stringify({venue_name:$('#setupVenue').value,control_centre_name:$('#setupControl').value,admin_display_name:$('#setupAdminName').value,admin_username:$('#setupAdminUser').value,admin_password:ap,speaker_display_name:$('#setupSpeakerName').value,speaker_username:$('#setupSpeakerUser').value,speaker_password:sp})});token=r.token;localStorage.setItem('rc_token',token);await load()}catch(err){$('#setupError').textContent=err.message}});
 $('#loginForm').addEventListener('submit',async e=>{e.preventDefault();$('#loginError').textContent='';try{const r=await api('/api/auth/login',{method:'POST',body:JSON.stringify({username:$('#loginUser').value.trim(),password:$('#loginPass').value})});token=r.token;localStorage.setItem('rc_token',token);await load()}catch(err){$('#loginError').textContent=err.message}});
 $('#opLoginForm').addEventListener('submit',async e=>{e.preventDefault();$('#opLoginError').textContent='';const opId=$('#opName').value,evId=$('#opEvent').value,rmId=$('#opRoom').value;if(!opId||!evId||!rmId)return $('#opLoginError').textContent='Please choose your name, event and room.';try{const r=await api('/api/operator/login',{method:'POST',body:JSON.stringify({operator_id:Number(opId),event_id:Number(evId),room_id:Number(rmId),device_role:$('#opRole').value,device_name:''})});token=r.token;localStorage.setItem('rc_token',token);await load()}catch(err){$('#opLoginError').textContent=err.message}});
@@ -87,6 +101,7 @@ function wsHandle(msg){
             S.unreadDM[other.kind+':'+other.id]=true;
             updateDMBadge();
             if(S.view==='dm')loadDMContacts();
+            notifyNative(`Message from ${m.sender}`,m.body,'normal');
         }
         if(!mine&&(!open||document.hidden))bumpUnread();
         return;
@@ -97,6 +112,7 @@ function wsHandle(msg){
             const tag=msg.request.scope==='venue'?'📢 Venue-wide':'📣 Event-wide';
             showToast(`${tag} — <b>${esc(msg.request.room_name||'A room')}</b> needs help — ${esc(msg.request.category)}: ${esc(msg.request.description)}`,()=>openHelpThread(msg.request.id));
             bumpUnread();
+            notifyNative(`${tag} help needed`,`${msg.request.room_name||'A room'} — ${msg.request.category}: ${msg.request.description}`,'important');
         }
         return;
     }
@@ -107,6 +123,7 @@ function wsHandle(msg){
         const canOpen=S.d.me.kind==='account';
         const r=canOpen?S.d.rooms.find(x=>x.id===msg.room_id):null;
         showToast(`🚨 <b>EMERGENCY</b> — ${esc(msg.room_name||'Room')}${msg.event_name?` (${esc(msg.event_name)})`:''}: ${esc(msg.body)}`,r?()=>openRoom(r.event_id,r.id):null);
+        notifyNative('🚨 EMERGENCY',`${msg.room_name||'Room'}${msg.event_name?` (${msg.event_name})`:''}: ${msg.body}`,'emergency');
         return;
     }
     if(msg.type==='room_updated'){
@@ -123,7 +140,7 @@ function wsHandle(msg){
         return;
     }
     if(msg.type==='issue_new'||msg.type==='issue_updated'){
-        if(msg.type==='issue_new'){S.unreadIssues++;updateIssuesBadge();showToast(`🐞 New issue reported by <b>${esc(msg.issue.reporter_name)}</b> — ${esc(msg.issue.category)}: ${esc(msg.issue.description)}`,()=>issuesPage());bumpUnread()}
+        if(msg.type==='issue_new'){S.unreadIssues++;updateIssuesBadge();showToast(`🐞 New issue reported by <b>${esc(msg.issue.reporter_name)}</b> — ${esc(msg.issue.category)}: ${esc(msg.issue.description)}`,()=>issuesPage());bumpUnread();notifyNative('🐞 New issue reported',`${msg.issue.reporter_name} — ${msg.issue.category}: ${msg.issue.description}`,'normal')}
         if(S.view==='issues')issuesPage();
         return;
     }
@@ -136,8 +153,8 @@ function wsHandle(msg){
     if(msg.type==='message_new'&&!mineMsg(msg.message)&&(msg.message.scope==='room'||msg.message.scope==='venue')){
         const openHere=S.feed&&S.feed.scope===msg.message.scope&&(msg.message.scope==='venue'||S.feed.scope_id===msg.message.scope_id);
         if(!openHere){
-            if(msg.message.scope==='venue'){S.unreadVenue=true;updateVenueBadge()}
-            else if(S.d.me.kind==='operator'&&msg.message.scope_id===S.d.me.room_id){S.unreadOwnRoom=true;updateRoomBadge()}
+            if(msg.message.scope==='venue'){S.unreadVenue=true;updateVenueBadge();notifyNative('Venue message',`${msg.message.sender}: ${msg.message.body}`,msg.message.priority)}
+            else if(S.d.me.kind==='operator'&&msg.message.scope_id===S.d.me.room_id){S.unreadOwnRoom=true;updateRoomBadge();notifyNative(`${msg.message.sender} — Your room`,msg.message.body,msg.message.priority)}
             else if(S.d.rooms){S.unreadRoom[msg.message.scope_id]=true;renderChrome()}
         }
         if(!openHere||document.hidden)bumpUnread();

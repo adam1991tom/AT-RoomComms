@@ -5,7 +5,7 @@ namespace ATRoomComms.Client;
 
 internal static class Program
 {
-    internal const string AppVersion = "0.2.0";
+    internal const string AppVersion = "0.3.0";
     internal const string RegistryPath = @"SOFTWARE\AT Software\AT RoomComms Client";
 
     [STAThread]
