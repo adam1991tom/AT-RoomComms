@@ -251,14 +251,19 @@ internal sealed class MainForm : Form
                 _ => ToolTipIcon.Info
             };
 
+            // Windows can silently drop a balloon tip shown right after the icon
+            // is (re-)made visible; re-asserting Visible first is a known mitigation.
+            _notifyIcon.Visible = true;
             _notifyIcon.BalloonTipTitle = title.Length > 63 ? title[..63] : title;
             _notifyIcon.BalloonTipText = body.Length > 255 ? body[..255] : body;
             _notifyIcon.BalloonTipIcon = icon;
             _notifyIcon.ShowBalloonTip(priority == "emergency" ? 15000 : 8000);
         }
-        catch
+        catch (Exception ex)
         {
-            // Invalid page messages are ignored so they can never crash a live client.
+            // Invalid page messages, or a failed balloon tip, must never crash a
+            // live client - but do record it so it's visible on the Devices page.
+            _lastError = $"Notification failed: {ex.Message}";
         }
     }
 
