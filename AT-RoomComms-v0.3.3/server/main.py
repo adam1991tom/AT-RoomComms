@@ -6,7 +6,7 @@ from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-VERSION='0.7.6'
+VERSION='0.7.7'
 DATA=Path(os.getenv('ROOMCOMMS_DATA','/data')); DB=DATA/'roomcomms.db'; UP=DATA/'uploads'
 DATA.mkdir(parents=True,exist_ok=True); UP.mkdir(exist_ok=True)
 app=FastAPI(title='AT RoomComms',version=VERSION)
@@ -530,13 +530,12 @@ def dm_contacts(authorization:str|None=Header(default=None)):
     with db() as c:
         accts=c.execute('SELECT id,display_name FROM accounts WHERE active=1').fetchall()
         out=[{'kind':'account','id':r['id'],'display_name':r['display_name']} for r in accts if not (a['kind']=='account' and r['id']==a['id'])]
-        if a['kind']=='account':
-            out+=[{'kind':'operator','id':r['id'],'display_name':r['name']} for r in c.execute('SELECT id,name FROM operators WHERE active=1')]
+        ops=c.execute('SELECT id,name FROM operators WHERE active=1').fetchall()
+        out+=[{'kind':'operator','id':r['id'],'display_name':r['name']} for r in ops if not (a['kind']=='operator' and r['id']==a['id'])]
     return out
 @app.get('/api/dm')
 def dm_thread(with_kind:str,with_id:int,authorization:str|None=Header(default=None)):
     a=require_actor(authorization)
-    if a['kind']=='operator' and with_kind!='account':raise HTTPException(403,'Operators can only message Control Centre accounts')
     with db() as c:
         rows=c.execute("SELECT * FROM messages WHERE scope='dm' AND deleted_at IS NULL AND ((sender_kind=? AND sender_id=? AND to_kind=? AND to_id=?) OR (sender_kind=? AND sender_id=? AND to_kind=? AND to_id=?)) ORDER BY id DESC LIMIT 250",(a['kind'],a['id'],with_kind,with_id,with_kind,with_id,a['kind'],a['id']))
         out=[]
@@ -547,7 +546,7 @@ def dm_thread(with_kind:str,with_id:int,authorization:str|None=Header(default=No
 async def dm_send(x:DMIn,authorization:str|None=Header(default=None)):
     a=require_actor(authorization)
     if x.to_kind not in ('account','operator'):raise HTTPException(400,'Invalid recipient')
-    if a['kind']=='operator' and x.to_kind!='account':raise HTTPException(403,'Operators can only message Control Centre accounts')
+    if a['kind']==x.to_kind and a['id']==x.to_id:raise HTTPException(400,"Can't message yourself")
     body=x.body.strip()
     if not body:raise HTTPException(400,'Message cannot be empty')
     with db() as c:
