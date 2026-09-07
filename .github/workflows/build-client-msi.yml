@@ -18,6 +18,9 @@ on:
         required: false
         default: ''
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
@@ -38,7 +41,7 @@ jobs:
           if (-not $v -and "${{ github.ref_type }}" -eq "tag") {
             $v = "${{ github.ref_name }}" -replace '^client-v',''
           }
-          if (-not $v) { $v = "0.3.0" }
+          if (-not $v) { $v = "0.4.0" }
           echo "version=$v" >> $env:GITHUB_OUTPUT
           Write-Host "Building client version: $v"
 
