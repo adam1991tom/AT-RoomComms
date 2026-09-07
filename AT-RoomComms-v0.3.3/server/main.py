@@ -6,7 +6,7 @@ from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-VERSION='0.7.0'
+VERSION='0.7.1'
 DATA=Path(os.getenv('ROOMCOMMS_DATA','/data')); DB=DATA/'roomcomms.db'; UP=DATA/'uploads'
 DATA.mkdir(parents=True,exist_ok=True); UP.mkdir(exist_ok=True)
 app=FastAPI(title='AT RoomComms',version=VERSION)
@@ -102,6 +102,7 @@ CREATE TABLE IF NOT EXISTS issues(id INTEGER PRIMARY KEY AUTOINCREMENT,reporter_
         dcols=[r['name'] for r in c.execute('PRAGMA table_info(devices)')]
         if 'presenting' not in dcols:c.execute('ALTER TABLE devices ADD COLUMN presenting INTEGER DEFAULT 0')
         if 'uptime_seconds' not in dcols:c.execute('ALTER TABLE devices ADD COLUMN uptime_seconds INTEGER DEFAULT 0')
+        if 'diagnostics' not in dcols:c.execute("ALTER TABLE devices ADD COLUMN diagnostics TEXT DEFAULT '{}'")
         rcols=[r['name'] for r in c.execute('PRAGMA table_info(rooms)')]
         if 'event_id' not in rcols:
             c.execute('ALTER TABLE rooms ADD COLUMN event_id INTEGER')
@@ -623,11 +624,16 @@ async def device_register(x:DeviceIn):
 @app.post('/api/devices/heartbeat')
 async def device_heartbeat(p:dict):
     name=p.get('name','')
+    sets=['online_status=\'online\'','last_heartbeat=?'];vals=[now()]
+    if 'presenting' in p:sets.append('presenting=?');vals.append(1 if p.get('presenting') else 0)
+    if 'uptime_seconds' in p:sets.append('uptime_seconds=?');vals.append(int(p.get('uptime_seconds') or 0))
+    if 'room_id' in p:sets.append('room_id=?');vals.append(p.get('room_id'))
+    if 'event_id' in p:sets.append('event_id=?');vals.append(p.get('event_id'))
+    if 'operator' in p:sets.append('operator=?');vals.append(p.get('operator') or '')
+    if 'diagnostics' in p:sets.append('diagnostics=?');vals.append(json.dumps(p.get('diagnostics'))[:2000])
+    vals.append(name)
     with db() as c:
-        if 'presenting' in p or 'uptime_seconds' in p:
-            c.execute("UPDATE devices SET online_status='online',last_heartbeat=?,presenting=?,uptime_seconds=? WHERE name=?",(now(),1 if p.get('presenting') else 0,int(p.get('uptime_seconds') or 0),name))
-        else:
-            c.execute("UPDATE devices SET online_status='online',last_heartbeat=? WHERE name=?",(now(),name))
+        c.execute(f"UPDATE devices SET {','.join(sets)} WHERE name=?",vals)
         row=c.execute('SELECT * FROM devices WHERE name=?',(name,)).fetchone()
         d=dict(row) if row else None
     if d:await manager.broadcast({'type':'device_updated','device':d},visible=lambda actor:actor['kind']=='account')
