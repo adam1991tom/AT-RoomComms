@@ -17,6 +17,7 @@ internal sealed class MainForm : Form
     private readonly System.Windows.Forms.Timer _telemetryTimer = new() { Interval = 20_000 };
     private bool _reallyClose;
     private bool _hasShownTrayHint;
+    private string? _lastError;
 
     internal MainForm(string serverUrl)
     {
@@ -179,11 +180,16 @@ internal sealed class MainForm : Form
                     ? Color.FromArgb(90, 225, 145)
                     : Color.FromArgb(255, 105, 125);
             };
-            _webView.CoreWebView2.ProcessFailed += (_, _) => _webView.Reload();
+            _webView.CoreWebView2.ProcessFailed += (_, e) =>
+            {
+                _lastError = $"WebView2 process failed: {e.ProcessFailedKind}";
+                _webView.Reload();
+            };
             NavigateClient();
         }
         catch (WebView2RuntimeNotFoundException)
         {
+            _lastError = "WebView2 runtime not found";
             MessageBox.Show(
                 "Microsoft Edge WebView2 Runtime is required. Windows 11 normally includes it. Install the Evergreen WebView2 Runtime, then reopen AT RoomComms.",
                 "WebView2 Runtime Required",
@@ -193,6 +199,7 @@ internal sealed class MainForm : Form
         }
         catch (Exception ex)
         {
+            _lastError = ex.Message;
             MessageBox.Show(ex.Message, "AT RoomComms", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
@@ -265,6 +272,13 @@ internal sealed class MainForm : Form
                 type = "telemetry",
                 presenting = PowerPointDetector.IsPresenting(),
                 uptimeSeconds = (int)(DateTime.UtcNow - _startedAtUtc).TotalSeconds,
+                diagnostics = new
+                {
+                    os = Environment.OSVersion.VersionString,
+                    webview2 = TryGetWebView2Version(),
+                    clientVersion = Program.AppVersion,
+                    lastError = _lastError ?? "",
+                },
             });
             _webView.CoreWebView2.PostWebMessageAsJson(payload);
         }
@@ -272,6 +286,12 @@ internal sealed class MainForm : Form
         {
             // The page may not be ready yet; skip this tick.
         }
+    }
+
+    private static string TryGetWebView2Version()
+    {
+        try { return CoreWebView2Environment.GetAvailableBrowserVersionString(); }
+        catch { return "unknown"; }
     }
 }
 
