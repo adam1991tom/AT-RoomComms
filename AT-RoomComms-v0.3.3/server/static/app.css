@@ -75,6 +75,7 @@ aside{background:rgba(6,7,12,.85);backdrop-filter:blur(10px);border-right:1px so
 .eventName{font-size:11px;color:#b2b5bf;margin:8px 0;cursor:pointer}
 .roomNav{font-size:11px;color:#999faa;padding:5px;cursor:pointer;border-radius:6px}
 .roomNav:hover,.eventName:hover{color:#fff;background:rgba(255,255,255,.04)}
+.roomNav.active,.eventName.active{color:#fff;background:rgba(var(--accent-rgb),.18);box-shadow:inset 2px 0 0 var(--cyan)}
 .userBox{margin-top:18px;padding:12px;border-top:1px solid var(--line-soft);font-size:11px;color:var(--muted)}
 
 main{position:relative}
