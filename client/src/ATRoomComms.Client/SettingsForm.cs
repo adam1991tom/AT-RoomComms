@@ -18,6 +18,8 @@ internal sealed class SettingsForm : Form
     {
         ServerUrl = currentServerUrl;
 
+        AutoScaleMode = AutoScaleMode.Dpi;
+        AutoScaleDimensions = new SizeF(96F, 96F);
         Text = "AT RoomComms — Settings";
         Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
         StartPosition = FormStartPosition.CenterScreen;

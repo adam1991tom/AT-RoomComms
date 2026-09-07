@@ -13,13 +13,15 @@ internal sealed class ServerSetupForm : Form
 
     internal ServerSetupForm(string current)
     {
+        AutoScaleMode = AutoScaleMode.Dpi;
+        AutoScaleDimensions = new SizeF(96F, 96F);
         Text = "AT RoomComms — Server Setup";
         Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
-        ClientSize = new Size(570, 330);
+        ClientSize = new Size(600, 350);
         BackColor = Branding.Bg;
         ForeColor = Branding.Text;
         Font = new Font("Segoe UI", 10F);

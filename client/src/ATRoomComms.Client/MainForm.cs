@@ -21,6 +21,8 @@ internal sealed class MainForm : Form
 
     internal MainForm(string serverUrl)
     {
+        AutoScaleMode = AutoScaleMode.Dpi;
+        AutoScaleDimensions = new SizeF(96F, 96F);
         _serverUrl = Settings.NormaliseUrl(serverUrl);
         Text = $"AT RoomComms — v{Program.AppVersion}";
         Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
