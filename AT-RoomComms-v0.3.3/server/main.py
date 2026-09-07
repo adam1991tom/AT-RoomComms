@@ -14,7 +14,7 @@ from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 
-VERSION='0.9.1'
+VERSION='0.9.2'
 DATA=Path(os.getenv('ROOMCOMMS_DATA','/data')); DB=DATA/'roomcomms.db'; UP=DATA/'uploads'
 DATA.mkdir(parents=True,exist_ok=True); UP.mkdir(exist_ok=True)
 KEY_FILE=DATA/'.encryption_key'
@@ -353,60 +353,109 @@ def event_update(eid:int,x:EventIn,authorization:str|None=Header(default=None)):
     a=require_auth(authorization);require_manager(a)
     with db() as c:c.execute('UPDATE events SET name=?,client=?,event_color=?,starts_at=?,ends_at=?,event_status=? WHERE id=?',(x.name.strip(),x.client.strip(),x.event_color,x.starts_at,x.ends_at,x.event_status,eid))
     return {'ok':True}
+def fmt_report_dt(iso):
+    if not iso:return '—'
+    try:
+        s=iso[:19] if len(iso)>19 else iso
+        dt=datetime.fromisoformat(s)
+        return dt.strftime('%d %b %Y, %H:%M')
+    except Exception:
+        return iso[:16] if len(iso)>16 else iso
+
+STATUS_COLORS={'new':'#c0392b','acknowledged':'#b26a00','resolved':'#1c7c3c','cancelled':'#777777'}
+
 def render_event_report_pdf(r):
     styles=getSampleStyleSheet()
-    title_style=ParagraphStyle('RCTitle',parent=styles['Title'],textColor=colors.HexColor('#1ea0dc'))
-    h2=ParagraphStyle('RCH2',parent=styles['Heading2'],spaceBefore=14,textColor=colors.HexColor('#0c6e9c'))
-    body=styles['BodyText']
-    small=ParagraphStyle('RCSmall',parent=styles['BodyText'],fontSize=8,leading=10)
-    buf=BytesIO()
-    doc=SimpleDocTemplate(buf,pagesize=A4,topMargin=18*mm,bottomMargin=16*mm,leftMargin=16*mm,rightMargin=16*mm,title=f"{r['event']['name']} - Event Report")
+    accent_dark=colors.HexColor('#0c6e9c');ink=colors.HexColor('#1b2430');muted=colors.HexColor('#6b7480')
+    eyebrow=ParagraphStyle('RCEyebrow',parent=styles['Normal'],textColor=accent_dark,fontSize=9,leading=11,spaceAfter=2)
+    title_style=ParagraphStyle('RCTitle',parent=styles['Title'],textColor=ink,fontSize=22,leading=26,spaceAfter=2,alignment=0)
+    meta_style=ParagraphStyle('RCMeta',parent=styles['Normal'],textColor=muted,fontSize=9.5,leading=13)
+    h2=ParagraphStyle('RCH2',parent=styles['Heading2'],fontSize=13,spaceBefore=16,spaceAfter=6,textColor=accent_dark)
+    body=ParagraphStyle('RCBody',parent=styles['BodyText'],fontSize=9.5,textColor=ink)
+    cell=ParagraphStyle('RCCell',parent=styles['BodyText'],fontSize=8.5,leading=11,textColor=ink)
+    head_cell=ParagraphStyle('RCHeadCell',parent=cell,textColor=colors.white,fontName='Helvetica-Bold')
+
+    def P(txt,style=cell):return Paragraph(pdf_esc(str(txt)) if txt not in (None,'') else '—',style)
+    def status_para(s):
+        c=STATUS_COLORS.get((s or '').lower(),'#6b7480')
+        return Paragraph(f'<font color="{c}"><b>{pdf_esc((s or "unknown").upper())}</b></font>',cell)
+    def zebra(n,header_bg):
+        cmds=[('BACKGROUND',(0,0),(-1,0),header_bg),
+              ('GRID',(0,0),(-1,-1),0.5,colors.HexColor('#e2e6ea')),('VALIGN',(0,0),(-1,-1),'MIDDLE'),
+              ('TOPPADDING',(0,0),(-1,-1),6),('BOTTOMPADDING',(0,0),(-1,-1),6),
+              ('LEFTPADDING',(0,0),(-1,-1),8),('RIGHTPADDING',(0,0),(-1,-1),8)]
+        for i in range(1,n):
+            if i%2==0:cmds.append(('BACKGROUND',(0,i),(-1,i),colors.HexColor('#f7fafc')))
+        return TableStyle(cmds)
+
+    CONTENT_W=178*mm
     e=r['event']
-    story=[Paragraph('AT RoomComms — Event Report',title_style),Spacer(1,4*mm),
-        Paragraph(pdf_esc(e['name'] or 'Event'),styles['Heading1']),
-        Paragraph(f"{pdf_esc(e.get('client') or 'No client')} &nbsp;·&nbsp; {pdf_esc(e.get('event_status') or '')} &nbsp;·&nbsp; {pdf_esc(e.get('starts_at') or '')} → {pdf_esc(e.get('ends_at') or '')}",body),
-        Spacer(1,6*mm)]
+    sched_bits=[b for b in [e.get('starts_at'),e.get('ends_at')] if b]
+    sched=f"{fmt_report_dt(e.get('starts_at'))} → {fmt_report_dt(e.get('ends_at'))}" if sched_bits else 'No schedule set'
+    generated=datetime.now(timezone.utc).strftime('%d %b %Y, %H:%M UTC')
+
+    def footer(canvas,doc):
+        canvas.saveState()
+        canvas.setStrokeColor(colors.HexColor('#e2e6ea'));canvas.setLineWidth(0.6)
+        canvas.line(16*mm,14*mm,A4[0]-16*mm,14*mm)
+        canvas.setFont('Helvetica',7.5);canvas.setFillColor(muted)
+        canvas.drawString(16*mm,9*mm,f"{r.get('venue_name') or 'AT RoomComms'} · Generated {generated}")
+        canvas.drawRightString(A4[0]-16*mm,9*mm,f"Page {doc.page}")
+        canvas.restoreState()
+
+    buf=BytesIO()
+    doc=SimpleDocTemplate(buf,pagesize=A4,topMargin=18*mm,bottomMargin=20*mm,leftMargin=16*mm,rightMargin=16*mm,
+        title=f"{e['name']} - Event Report",author='AT RoomComms')
+
+    story=[Paragraph('AT ROOMCOMMS &nbsp;·&nbsp; EVENT REPORT',eyebrow),
+        Paragraph(pdf_esc(e['name'] or 'Event'),title_style),
+        Paragraph(f"{pdf_esc(e.get('client') or 'No client')} &nbsp;·&nbsp; {pdf_esc((e.get('event_status') or '').replace('_',' ').title())} &nbsp;·&nbsp; {pdf_esc(sched)}",meta_style),
+        Spacer(1,7*mm)]
+
     total_msgs=sum(x['message_count'] for x in r['rooms'])
-    summary=Table([['Rooms','Messages','Help Requests','Emergency Alerts'],
-        [str(len(r['rooms'])),str(total_msgs),str(len(r['help_requests'])),str(len(r['emergencies']))]],
-        colWidths=[42*mm]*4)
-    summary.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#0c6e9c')),('TEXTCOLOR',(0,0),(-1,0),colors.white),
-        ('FONTSIZE',(0,0),(-1,-1),9),('ALIGN',(0,0),(-1,-1),'CENTER'),('GRID',(0,0),(-1,-1),0.5,colors.HexColor('#cccccc')),
-        ('BOTTOMPADDING',(0,0),(-1,-1),6),('TOPPADDING',(0,0),(-1,-1),6)]))
-    story+= [summary, Paragraph('Rooms',h2)]
-    room_rows=[['Room','Operator','Messages','First activity','Last activity']]
+    stat_labels=['ROOMS','MESSAGES','HELP REQUESTS','EMERGENCY ALERTS']
+    stat_values=[len(r['rooms']),total_msgs,len(r['help_requests']),len(r['emergencies'])]
+    stat_style=ParagraphStyle('RCStatNum',parent=styles['Normal'],fontSize=18,leading=22,textColor=colors.white,alignment=1,fontName='Helvetica-Bold')
+    stat_lbl_style=ParagraphStyle('RCStatLbl',parent=styles['Normal'],fontSize=7.5,leading=10,textColor=colors.HexColor('#cfe9f7'),alignment=1)
+    summary=Table([[Paragraph(str(v),stat_style) for v in stat_values],[Paragraph(l,stat_lbl_style) for l in stat_labels]],
+        colWidths=[CONTENT_W/4]*4,rowHeights=[9*mm,6*mm])
+    summary.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,-1),accent_dark),('VALIGN',(0,0),(-1,-1),'MIDDLE'),
+        ('TOPPADDING',(0,0),(-1,0),6),('BOTTOMPADDING',(0,1),(-1,1),8),
+        ('LINEAFTER',(0,0),(-2,-1),0.6,colors.HexColor('#1487ad'))]))
+    story.append(summary)
+
+    story.append(Paragraph('Rooms',h2))
+    room_rows=[[P('Room',head_cell),P('Operator',head_cell),P('Msgs',head_cell),P('First activity',head_cell),P('Last activity',head_cell)]]
     for x in r['rooms']:
-        room_rows.append([x['name'],x.get('operator_name') or 'Unassigned',str(x['message_count']),x.get('first_activity') or '—',x.get('last_activity') or '—'])
-    rt=Table(room_rows,colWidths=[32*mm,32*mm,20*mm,42*mm,42*mm],repeatRows=1)
-    rt.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#eef6fb')),('FONTSIZE',(0,0),(-1,-1),8),
-        ('GRID',(0,0),(-1,-1),0.5,colors.HexColor('#dddddd')),('VALIGN',(0,0),(-1,-1),'MIDDLE'),
-        ('BOTTOMPADDING',(0,0),(-1,-1),4),('TOPPADDING',(0,0),(-1,-1),4)]))
+        room_rows.append([P(x['name']),P(x.get('operator_name') or 'Unassigned'),Paragraph(str(x['message_count']),cell),
+            P(fmt_report_dt(x.get('first_activity'))),P(fmt_report_dt(x.get('last_activity')))])
+    rt=Table(room_rows,colWidths=[34*mm,32*mm,16*mm,48*mm,48*mm],repeatRows=1)
+    rt.setStyle(zebra(len(room_rows),accent_dark))
     story.append(rt)
+
     story.append(Paragraph('Help Requests',h2))
     if r['help_requests']:
-        hr_rows=[['Room','Category','Description','Status']]
+        hr_rows=[[P('Room',head_cell),P('Category',head_cell),P('Description',head_cell),P('Status',head_cell)]]
         for h in r['help_requests']:
-            hr_rows.append([h.get('room_name') or 'Room',h.get('category') or '',Paragraph(pdf_esc(h.get('description') or ''),small),h.get('status') or ''])
-        ht=Table(hr_rows,colWidths=[28*mm,28*mm,80*mm,32*mm],repeatRows=1)
-        ht.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#eef6fb')),('FONTSIZE',(0,0),(-1,-1),8),
-            ('GRID',(0,0),(-1,-1),0.5,colors.HexColor('#dddddd')),('VALIGN',(0,0),(-1,-1),'TOP'),
-            ('BOTTOMPADDING',(0,0),(-1,-1),4),('TOPPADDING',(0,0),(-1,-1),4)]))
+            hr_rows.append([P(h.get('room_name') or 'Room'),P(h.get('category')),P(h.get('description')),status_para(h.get('status'))])
+        ht=Table(hr_rows,colWidths=[26*mm,28*mm,90*mm,34*mm],repeatRows=1)
+        ht.setStyle(zebra(len(hr_rows),accent_dark))
         story.append(ht)
     else:
         story.append(Paragraph('No help requests were raised.',body))
+
     story.append(Paragraph('Emergency Alerts',h2))
     if r['emergencies']:
-        em_rows=[['Sender','Message','Time']]
+        em_rows=[[P('Sender',head_cell),P('Message',head_cell),P('Time',head_cell)]]
         for m in r['emergencies']:
-            em_rows.append([m.get('sender') or '',Paragraph(pdf_esc(m.get('body') or ''),small),m.get('created_at') or ''])
-        et=Table(em_rows,colWidths=[32*mm,100*mm,36*mm],repeatRows=1)
-        et.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#fdeaea')),('FONTSIZE',(0,0),(-1,-1),8),
-            ('GRID',(0,0),(-1,-1),0.5,colors.HexColor('#dddddd')),('VALIGN',(0,0),(-1,-1),'TOP'),
-            ('BOTTOMPADDING',(0,0),(-1,-1),4),('TOPPADDING',(0,0),(-1,-1),4)]))
+            em_rows.append([P(m.get('sender')),P(m.get('body')),P(fmt_report_dt(m.get('created_at')))])
+        et=Table(em_rows,colWidths=[30*mm,100*mm,48*mm],repeatRows=1)
+        et.setStyle(zebra(len(em_rows),colors.HexColor('#a83232')))
         story.append(et)
     else:
         story.append(Paragraph('No emergency alerts were raised.',body))
-    doc.build(story)
+
+    doc.build(story,onFirstPage=footer,onLaterPages=footer)
     return buf.getvalue()
 
 def _event_report_data(eid):
@@ -428,7 +477,8 @@ def _event_report_data(eid):
             r['message_count']=msg_counts.get(r['id'],0)
             r['first_activity']=activity.get(r['id'],{}).get('first')
             r['last_activity']=activity.get(r['id'],{}).get('last')
-    return {'event':dict(event),'rooms':rooms,'help_requests':help_requests,'emergencies':emergencies}
+        venue_name=setting(c,'venue_name')
+    return {'event':dict(event),'rooms':rooms,'help_requests':help_requests,'emergencies':emergencies,'venue_name':venue_name}
 
 @app.get('/api/events/{eid}/report')
 def event_report(eid:int,authorization:str|None=Header(default=None)):
