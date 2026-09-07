@@ -6,7 +6,7 @@ from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-VERSION='0.7.4'
+VERSION='0.7.5'
 DATA=Path(os.getenv('ROOMCOMMS_DATA','/data')); DB=DATA/'roomcomms.db'; UP=DATA/'uploads'
 DATA.mkdir(parents=True,exist_ok=True); UP.mkdir(exist_ok=True)
 app=FastAPI(title='AT RoomComms',version=VERSION)
@@ -298,6 +298,16 @@ def operator_logout(authorization:str|None=Header(default=None)):
     if authorization and authorization.lower().startswith('bearer '):
         with db() as c:c.execute('DELETE FROM operator_sessions WHERE token=?',(authorization.split(' ',1)[1].strip(),))
     return {'ok':True}
+
+@app.get('/api/speaker-preview')
+def speaker_preview(authorization:str|None=Header(default=None)):
+    require_actor(authorization)
+    with db() as c:
+        rooms=[dict(r) for r in c.execute('SELECT * FROM rooms WHERE enabled=1 ORDER BY event_id,name')]
+        presence={r['id']:manager.room_presence(r['id']) for r in rooms}
+        events=[dict(r) for r in c.execute('SELECT * FROM events WHERE archived=0 ORDER BY starts_at,name')]
+        venue_name=setting(c,'venue_name')
+    return {'venue_name':venue_name,'events':events,'rooms':rooms,'presence':presence}
 
 @app.get('/api/bootstrap')
 def bootstrap(authorization:str|None=Header(default=None)):

@@ -95,11 +95,35 @@ async function start(){registerWindowsDevice();try{const s=await fetch('/api/set
 $('#setupForm').addEventListener('submit',async e=>{e.preventDefault();$('#setupError').textContent='';const ap=$('#setupAdminPass').value,sp=$('#setupSpeakerPass').value;if(ap!==$('#setupAdminConfirm').value)return $('#setupError').textContent='Administrator passwords do not match.';if(sp!==$('#setupSpeakerConfirm').value)return $('#setupError').textContent='Speaker Preview passwords do not match.';try{const r=await api('/api/setup/complete',{method:'POST',body:JSON.stringify({venue_name:$('#setupVenue').value,control_centre_name:$('#setupControl').value,admin_display_name:$('#setupAdminName').value,admin_username:$('#setupAdminUser').value,admin_password:ap,speaker_display_name:$('#setupSpeakerName').value,speaker_username:$('#setupSpeakerUser').value,speaker_password:sp})});token=r.token;sessionStorage.setItem('rc_token',token);await load()}catch(err){$('#setupError').textContent=err.message}});
 $('#loginForm').addEventListener('submit',async e=>{e.preventDefault();$('#loginError').textContent='';try{const r=await api('/api/auth/login',{method:'POST',body:JSON.stringify({username:$('#loginUser').value.trim(),password:$('#loginPass').value})});token=r.token;sessionStorage.setItem('rc_token',token);await load()}catch(err){$('#loginError').textContent=err.message}});
 $('#opLoginForm').addEventListener('submit',async e=>{e.preventDefault();$('#opLoginError').textContent='';const opId=$('#opName').value,evId=$('#opEvent').value,rmId=$('#opRoom').value;if(!opId||!evId||!rmId)return $('#opLoginError').textContent='Please choose your name, event and room.';try{const r=await api('/api/operator/login',{method:'POST',body:JSON.stringify({operator_id:Number(opId),event_id:Number(evId),room_id:Number(rmId),device_role:$('#opRole').value,device_name:''})});token=r.token;sessionStorage.setItem('rc_token',token);await load()}catch(err){$('#opLoginError').textContent=err.message}});
-async function load(){try{S.d=await api('/api/bootstrap');showOnly('app');if(S.d.me.kind==='operator'){await renderOperatorApp()}else{renderChrome();CLIENT_PARAMS.get('speaker')==='1'?speakerPreview():control()}wsConnect();S.sendDeviceHeartbeat?.();return true}catch(e){console.error(e);showOnly('login');const box=$('#loginError');if(box)box.textContent='RoomComms could not load: '+e.message;return false}}
+async function load(){try{
+    S.d=await api('/api/bootstrap');showOnly('app');
+    const wantSpeaker=CLIENT_PARAMS.get('speaker')==='1';
+    if(S.d.me.kind==='operator'){wantSpeaker?speakerPreview():await renderOperatorApp()}
+    else{renderChrome();wantSpeaker?speakerPreview():control()}
+    wsConnect();S.sendDeviceHeartbeat?.();return true
+}catch(e){console.error(e);showOnly('login');const box=$('#loginError');if(box)box.textContent='RoomComms could not load: '+e.message;return false}}
 function speakerPreview(){
-    S.view='speaker';S.feed=null;S.rerender=speakerPreview;title('Speaker Preview',S.d.settings.venue_name||'');
-    const cards=S.d.events.map(e=>`<div class="card"><div class="cardHead"><h2><span class="dot" style="background:${e.event_color}"></span>${esc(e.name)}</h2><small>${esc(e.event_status)}</small></div>${roomsFor(e.id).map(r=>`<div class="roomRow"><span class="dot ${r.current_status}"></span><b>${esc(r.name)}</b>${presenceDot(r.id)}<span class="operator">${r.operator_name?`👤 ${esc(r.operator_name)}`:'Unassigned'}</span><span class="badge">${statusLabel(r.current_status)}</span></div>`).join('')||'<div class="body">No rooms in this event.</div>'}</div>`).join('');
-    $('#content').innerHTML=`<div class="grid2">${cards||'<div class="card body">No active events.</div>'}</div>`;
+    S.view='speaker';S.feed=null;S.rerender=speakerPreview;
+    const isOp=S.d.me.kind==='operator';
+    if(isOp){
+        $('#app').classList.add('operatorMode');
+        $$('.nav[data-view]').forEach(b=>b.style.display='none');
+        $('.stats').style.display='none';
+        $('#eventNav').innerHTML='';
+        $('#venue').textContent=S.d.settings?.venue_name||'Venue';
+        $('#userBox').innerHTML=`<b>${esc(S.d.me.display_name)}</b>`;
+    }
+    title('Speaker Preview','');
+    $('#content').innerHTML='<div class="card body">Loading…</div>';
+    api('/api/speaker-preview').then(d=>{
+        if(S.view!=='speaker')return;
+        const backBtn=isOp?`<div class="toolbar"><button class="btn secondary" onclick="renderOperatorApp()">← Back to room</button></div>`:'';
+        const cards=d.events.map(e=>{
+            const rooms=d.rooms.filter(r=>r.event_id===e.id);
+            return `<div class="card"><div class="cardHead"><h2><span class="dot" style="background:${e.event_color}"></span>${esc(e.name)}</h2><small>${esc(e.event_status)}</small></div>${rooms.map(r=>`<div class="roomRow"><span class="dot ${r.current_status}"></span><b>${esc(r.name)}</b><span class="operator">${r.operator_name?`👤 ${esc(r.operator_name)}`:'Unassigned'}</span><span class="badge">${statusLabel(r.current_status)}</span></div>`).join('')||'<div class="body">No rooms in this event.</div>'}</div>`;
+        }).join('');
+        $('#content').innerHTML=`${backBtn}<div class="grid2">${cards||'<div class="card body">No active events.</div>'}</div>`;
+    }).catch(()=>{$('#content').innerHTML='<div class="card body">Could not load preview.</div>'});
 }
 window.speakerPreview=speakerPreview;
 async function refresh(){S.d=await api('/api/bootstrap');if(S.d.me.kind==='operator')await renderOperatorApp();else renderChrome()}
