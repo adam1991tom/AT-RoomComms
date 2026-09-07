@@ -46,9 +46,6 @@
         <RegistryValue Root="HKLM" Key="SOFTWARE\AT Software\AT RoomComms Client" Name="ServerUrl" Type="string" Value="[SERVERURL]" />
         <RegistryValue Root="HKLM" Key="SOFTWARE\AT Software\AT RoomComms Client" Name="InstalledVersion" Type="string" Value="$(var.Version)" KeyPath="yes" />
       </Component>
-      <Component Id="MachineStartup" Directory="INSTALLFOLDER" Guid="*">
-        <RegistryValue Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Run" Name="AT RoomComms Client" Type="string" Value="&quot;[INSTALLFOLDER]ATRoomComms.Client.exe&quot;" KeyPath="yes" />
-      </Component>
     </ComponentGroup>
 
     <Feature Id="MainFeature" Title="AT RoomComms Client" Level="1">

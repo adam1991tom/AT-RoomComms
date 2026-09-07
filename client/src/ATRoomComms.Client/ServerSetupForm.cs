@@ -20,8 +20,8 @@ internal sealed class ServerSetupForm : Form
         MaximizeBox = false;
         MinimizeBox = false;
         ClientSize = new Size(570, 330);
-        BackColor = Color.FromArgb(12, 9, 20);
-        ForeColor = Color.White;
+        BackColor = Branding.Bg;
+        ForeColor = Branding.Text;
         Font = new Font("Segoe UI", 10F);
 
         var title = new Label
@@ -41,7 +41,7 @@ internal sealed class ServerSetupForm : Form
         var serverLabel = new Label
         {
             Text = "SERVER ADDRESS",
-            ForeColor = Color.FromArgb(185, 154, 255),
+            ForeColor = Branding.Accent,
             AutoSize = true,
             Location = new Point(33, 139)
         };
@@ -49,48 +49,31 @@ internal sealed class ServerSetupForm : Form
         _serverBox.PlaceholderText = "Example: 10.100.70.101:5070";
         _serverBox.Location = new Point(33, 165);
         _serverBox.Size = new Size(504, 31);
-        _serverBox.BackColor = Color.FromArgb(26, 20, 40);
-        _serverBox.ForeColor = Color.White;
+        _serverBox.BackColor = Branding.Panel;
+        _serverBox.ForeColor = Branding.Text;
         _serverBox.BorderStyle = BorderStyle.FixedSingle;
 
-        _status.Text = "The address can be changed later from the Start menu.";
-        _status.ForeColor = Color.FromArgb(160, 150, 180);
+        _status.Text = "The address can be changed later from Settings.";
+        _status.ForeColor = Branding.Muted;
         _status.AutoSize = true;
         _status.Location = new Point(33, 207);
 
         _test.Text = "Test connection";
         _test.Location = new Point(248, 258);
         _test.Size = new Size(140, 42);
-        StyleSecondary(_test);
+        Branding.StyleSecondary(_test);
         _test.Click += async (_, _) => await TestConnectionAsync();
 
         _save.Text = "Save and open";
         _save.Location = new Point(397, 258);
         _save.Size = new Size(140, 42);
-        StylePrimary(_save);
+        Branding.StylePrimary(_save);
         _save.Click += async (_, _) => await SaveAsync();
 
         Controls.AddRange([title, subtitle, serverLabel, _serverBox, _status, _test, _save]);
         AcceptButton = _save;
     }
 
-    private static void StylePrimary(Button button)
-    {
-        button.FlatStyle = FlatStyle.Flat;
-        button.FlatAppearance.BorderSize = 0;
-        button.BackColor = Color.FromArgb(116, 62, 220);
-        button.ForeColor = Color.White;
-        button.Cursor = Cursors.Hand;
-    }
-
-    private static void StyleSecondary(Button button)
-    {
-        button.FlatStyle = FlatStyle.Flat;
-        button.FlatAppearance.BorderColor = Color.FromArgb(90, 65, 130);
-        button.BackColor = Color.FromArgb(31, 24, 47);
-        button.ForeColor = Color.White;
-        button.Cursor = Cursors.Hand;
-    }
 
     private async Task<bool> CheckAsync()
     {
