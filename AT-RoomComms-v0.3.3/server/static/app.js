@@ -178,10 +178,12 @@ function wsHandle(msg){
     if(msg.type==='message_new'&&!mineMsg(msg.message)&&(msg.message.scope==='room'||msg.message.scope==='venue')){
         const openHere=S.feed&&S.feed.scope===msg.message.scope&&(msg.message.scope==='venue'||S.feed.scope_id===msg.message.scope_id);
         if(!openHere){
-            if(msg.message.scope==='venue'){S.unreadVenue=true;updateVenueBadge();notifyNative('Venue message',`${msg.message.sender}: ${msg.message.body}`,msg.message.priority)}
-            else if(S.d.me.kind==='operator'&&msg.message.scope_id===S.d.me.room_id){S.unreadOwnRoom=true;updateRoomBadge();notifyNative(`${msg.message.sender} — Your room`,msg.message.body,msg.message.priority)}
+            if(msg.message.scope==='venue'){S.unreadVenue=true;updateVenueBadge()}
+            else if(S.d.me.kind==='operator'&&msg.message.scope_id===S.d.me.room_id){S.unreadOwnRoom=true;updateRoomBadge()}
             else if(S.d.rooms){S.unreadRoom[msg.message.scope_id]=true;renderChrome()}
         }
+        if(msg.message.scope==='venue')notifyNative('Venue message',`${msg.message.sender}: ${msg.message.body}`,msg.message.priority);
+        else if(S.d.me.kind==='operator'&&msg.message.scope_id===S.d.me.room_id)notifyNative(`${msg.message.sender} — Your room`,msg.message.body,msg.message.priority);
         if(!openHere||document.hidden)bumpUnread();
     }
     if(!S.feed)return;
