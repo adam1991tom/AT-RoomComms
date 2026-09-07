@@ -1,10 +1,10 @@
 param(
     [switch]$NoPause,
-    [switch]$NoElevation
+    [switch]$NoElevation,
+    [string]$Version = "0.3.0"
 )
 
 $ErrorActionPreference = "Stop"
-$Version = "0.3.0"
 $Root = Split-Path $PSScriptRoot -Parent
 $Project = Join-Path $Root "src\ATRoomComms.Client\ATRoomComms.Client.csproj"
 $Publish = Join-Path $PSScriptRoot "Publish"
@@ -218,7 +218,8 @@ if ((-not $NoElevation) -and (-not (Test-IsAdmin))) {
         "-NoProfile",
         "-ExecutionPolicy", "Bypass",
         "-File", "`"$PSCommandPath`"",
-        "-NoElevation"
+        "-NoElevation",
+        "-Version", $Version
     )
     if ($NoPause) { $args += "-NoPause" }
     $process = Start-Process powershell.exe -Verb RunAs -ArgumentList $args -PassThru
@@ -282,6 +283,7 @@ try {
         "--self-contained", "true",
         "--no-restore",
         "-p:PublishSingleFile=false",
+        "-p:Version=$Version",
         "-o", $Publish
     )
 
@@ -325,6 +327,7 @@ try {
         "-arch", "x64",
         "-d", "PublishDir=$Publish",
         "-d", "IconPath=$IconPath",
+        "-d", "Version=$Version",
         "-out", $msi
     )
 

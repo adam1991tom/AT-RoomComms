@@ -1,0 +1,68 @@
+name: Build Windows Client MSI
+
+on:
+  push:
+    branches: [main, chat-overhaul]
+    paths:
+      - 'client/**'
+      - '.github/workflows/build-client-msi.yml'
+    tags:
+      - 'client-v*'
+  pull_request:
+    paths:
+      - 'client/**'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (e.g. 0.3.1). Leave blank to use the tag or default.'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Determine version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = "${{ github.event.inputs.version }}"
+          if (-not $v -and "${{ github.ref_type }}" -eq "tag") {
+            $v = "${{ github.ref_name }}" -replace '^client-v',''
+          }
+          if (-not $v) { $v = "0.3.0" }
+          echo "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "Building client version: $v"
+
+      - name: Build MSI
+        shell: pwsh
+        run: |
+          .\client\installer\Build-MSI.ps1 -NoElevation -NoPause -Version "${{ steps.ver.outputs.version }}"
+
+      - name: Upload MSI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AT-RoomComms-Client-v${{ steps.ver.outputs.version }}
+          path: |
+            client/installer/Output/*.msi
+            client/installer/Output/*.sha256
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/client-v')
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $files = Get-ChildItem client\installer\Output\*.msi, client\installer\Output\*.sha256
+          gh release create "${{ github.ref_name }}" $files `
+            --title "AT RoomComms Client v${{ steps.ver.outputs.version }}" `
+            --notes "Automated build from tag ${{ github.ref_name }}. See client/README.md for install instructions."

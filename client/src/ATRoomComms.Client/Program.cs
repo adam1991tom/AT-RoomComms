@@ -1,12 +1,15 @@
 using System.Diagnostics;
+using System.Reflection;
 using Microsoft.Win32;
 
 namespace ATRoomComms.Client;
 
 internal static class Program
 {
-    internal const string AppVersion = "0.3.0";
+    internal static readonly string AppVersion =
+        Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.0.0";
     internal const string RegistryPath = @"SOFTWARE\AT Software\AT RoomComms Client";
+    internal const string GitHubRepo = "adam1991tom/AT-RoomComms";
 
     [STAThread]
     private static void Main(string[] args)
