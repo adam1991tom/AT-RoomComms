@@ -133,6 +133,12 @@ function wsConnect(){if(!token)return;wsClose(true);wsStatus('connecting');const
 function wsClose(keep){if(ws){const s=ws;ws=null;s.onclose=null;s.close()}if(!keep)wsRetry=0}
 function wsHandle(msg){
     if(msg.type==='force_logout'){signOut();return}
+    if(msg.type==='message_updated'&&msg.message.scope==='dm'){
+        const m=msg.message,mine=m.sender_kind===S.d.me.kind&&m.sender_id===S.d.me.id;
+        const other=mine?{kind:m.to_kind,id:m.to_id}:{kind:m.sender_kind,id:m.sender_id};
+        if(S.dmWith&&S.dmWith.kind===other.kind&&S.dmWith.id===other.id)feedReplace(m);
+        return;
+    }
     if(msg.type==='dm_new'){
         const m=msg.message,mine=m.sender_kind===S.d.me.kind&&m.sender_id===S.d.me.id;
         const other=mine?{kind:m.to_kind,id:m.to_id}:{kind:m.sender_kind,id:m.sender_id};
@@ -309,11 +315,21 @@ function messageHtml(m){
 ${atts}
 ${helpAction}
 <div class="bubbleFoot"><small>${new Date(m.created_at).toLocaleString()}${m.edited_at?' · edited':''}</small><span class="msgActions">${canReplyPrivately?`<button class="linkBtn" onclick="openEmergencyThread(${m.id})">Reply privately ▸</button>`:''}${canModify?`<button class="linkBtn" onclick="editMessage(${m.id})">Edit</button><button class="linkBtn danger" onclick="deleteMessage(${m.id})">Delete</button>`:''}</span></div>
+${readReceipt(m)}
 </div></div>`}
+function readReceipt(m){
+    const others=(m.reads||[]).filter(r=>!(r.actor_kind===S.d.me.kind&&r.actor_id===S.d.me.id));
+    if(!others.length)return '';
+    const names=others.map(r=>r.display_name);
+    const label=names.length<=2?names.join(', '):`${names.slice(0,2).join(', ')} +${names.length-2}`;
+    const tip=others.map(r=>`${r.display_name} · ${new Date(r.read_at).toLocaleString()}`).join('\n');
+    return `<div class="reads" title="${esc(tip)}">✓ Seen by ${esc(label)}</div>`;
+}
+async function markRead(ids){if(!ids||!ids.length)return;try{await api('/api/messages/read',{method:'POST',body:JSON.stringify({ids})})}catch{}}
 function feedContainer(){return $('#feedList')}
 function feedIsAtBottom(el){return el.scrollHeight-el.scrollTop-el.clientHeight<80}
 function scrollFeedBottom(){const el=feedContainer();if(el)el.scrollTop=el.scrollHeight}
-function feedAppend(m){const el=feedContainer();if(!el||el.querySelector(`[data-mid="${m.id}"]`))return;const wasBottom=feedIsAtBottom(el);el.querySelector('.feedEmpty')?.remove();el.insertAdjacentHTML('beforeend',messageHtml(m));if(wasBottom)scrollFeedBottom()}
+function feedAppend(m){const el=feedContainer();if(!el||el.querySelector(`[data-mid="${m.id}"]`))return;const wasBottom=feedIsAtBottom(el);el.querySelector('.feedEmpty')?.remove();el.insertAdjacentHTML('beforeend',messageHtml(m));if(wasBottom)scrollFeedBottom();const mine=m.sender_kind===S.d.me.kind&&m.sender_id===S.d.me.id;if(!mine&&!document.hidden)markRead([m.id])}
 function feedReplace(m){const el=feedContainer();if(!el)return;const row=el.querySelector(`[data-mid="${m.id}"]`);if(row)row.outerHTML=messageHtml(m);else feedAppend(m)}
 function feedRemove(mid){const el=feedContainer();if(!el)return;el.querySelector(`[data-mid="${mid}"]`)?.remove();if(!el.children.length)el.innerHTML='<div class="body feedEmpty">No messages yet.</div>'}
 async function editMessage(mid){const el=$(`#msgBody-${mid}`);if(!el)return;const current=el.textContent;const next=prompt('Edit message:',current);if(next===null||next.trim()===''||next.trim()===current)return;const m=await api(`/api/messages/${mid}`,{method:'PATCH',body:JSON.stringify({body:next.trim()})});feedReplace(m)}window.editMessage=editMessage;

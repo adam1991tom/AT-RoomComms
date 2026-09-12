@@ -104,6 +104,7 @@ CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY AUTOINCREMENT,scope T
 CREATE TABLE IF NOT EXISTS attachments(id INTEGER PRIMARY KEY AUTOINCREMENT,message_id INTEGER,original_name TEXT,stored_name TEXT,mime_type TEXT,size INTEGER);
 CREATE TABLE IF NOT EXISTS help_requests(id INTEGER PRIMARY KEY AUTOINCREMENT,event_id INTEGER,room_id INTEGER,room_name TEXT,requested_by TEXT,category TEXT,description TEXT,priority TEXT,status TEXT,assigned_to TEXT,created_at TEXT,acknowledged_at TEXT,resolved_at TEXT);
 CREATE TABLE IF NOT EXISTS issues(id INTEGER PRIMARY KEY AUTOINCREMENT,reporter_name TEXT,reporter_kind TEXT,category TEXT,description TEXT,status TEXT DEFAULT 'open',created_at TEXT,resolved_at TEXT);
+CREATE TABLE IF NOT EXISTS message_reads(message_id INTEGER NOT NULL,actor_kind TEXT NOT NULL,actor_id INTEGER NOT NULL,display_name TEXT NOT NULL,read_at TEXT NOT NULL,PRIMARY KEY(message_id,actor_kind,actor_id),FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE);
 ''')
         cols=[r['name'] for r in c.execute('PRAGMA table_info(event_rooms)')]
         if 'operator_name' not in cols:c.execute("ALTER TABLE event_rooms ADD COLUMN operator_name TEXT DEFAULT ''")
@@ -164,6 +165,7 @@ class HelpIn(BaseModel): event_id:int|None=None; room_id:int|None=None; requeste
 class IssueIn(BaseModel): category:str; description:str
 class OperatorLoginIn(BaseModel): operator_id:int; event_id:int; room_id:int; device_role:str='main'; device_name:str=''
 class DMIn(BaseModel): to_kind:str; to_id:int; body:str
+class ReadIn(BaseModel): ids:list[int]
 
 def account_for_token(token:str):
     with db() as c:
@@ -577,21 +579,36 @@ def settings_update(p:dict,authorization:str|None=Header(default=None)):
             if k in allowed:c.execute('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',(k,str(v)))
     return {'ok':True}
 
+def reads_for(c,mid):
+    return [dict(x) for x in c.execute('SELECT actor_kind,actor_id,display_name,read_at FROM message_reads WHERE message_id=? ORDER BY read_at',(mid,))]
+def mark_read(c,actor,mid):
+    if c.execute('SELECT 1 FROM message_reads WHERE message_id=? AND actor_kind=? AND actor_id=?',(mid,actor['kind'],actor['id'])).fetchone():return None
+    ts=now()
+    c.execute('INSERT INTO message_reads(message_id,actor_kind,actor_id,display_name,read_at) VALUES(?,?,?,?,?)',(mid,actor['kind'],actor['id'],actor['display_name'],ts))
+    return ts
 def message_dict(c,mid):
     r=c.execute('SELECT * FROM messages WHERE id=?',(mid,)).fetchone()
     if not r:return None
-    d=dict(r);d['body']=decrypt_text(d['body']);d['attachments']=[dict(x) for x in c.execute('SELECT * FROM attachments WHERE message_id=?',(mid,))]
+    d=dict(r);d['body']=decrypt_text(d['body']);d['attachments']=[dict(x) for x in c.execute('SELECT * FROM attachments WHERE message_id=?',(mid,))];d['reads']=reads_for(c,mid)
     return d
 
 @app.get('/api/messages')
-def messages(scope:str,scope_id:int|None=None,authorization:str|None=Header(default=None)):
+async def messages(scope:str,scope_id:int|None=None,authorization:str|None=Header(default=None)):
     a=require_actor(authorization)
     with db() as c:
         if not actor_can_access(a,c,scope,scope_id):raise HTTPException(403,'No access to this feed')
-        rows=c.execute("SELECT * FROM messages WHERE scope='venue' AND deleted_at IS NULL ORDER BY id DESC LIMIT 250") if scope=='venue' else c.execute('SELECT * FROM messages WHERE scope=? AND scope_id=? AND deleted_at IS NULL ORDER BY id DESC LIMIT 250',(scope,scope_id));out=[]
-        for r in reversed(rows.fetchall()):
-            d=dict(r);d['body']=decrypt_text(d['body']);d['attachments']=[dict(x) for x in c.execute('SELECT * FROM attachments WHERE message_id=?',(r['id'],))];out.append(d)
-        return out
+        rows=list(reversed((c.execute("SELECT * FROM messages WHERE scope='venue' AND deleted_at IS NULL ORDER BY id DESC LIMIT 250") if scope=='venue' else c.execute('SELECT * FROM messages WHERE scope=? AND scope_id=? AND deleted_at IS NULL ORDER BY id DESC LIMIT 250',(scope,scope_id))).fetchall()))
+        newly_read=[r['id'] for r in rows if not (r['sender_kind']==a['kind'] and r['sender_id']==a['id']) and mark_read(c,a,r['id'])]
+        out=[]
+        for r in rows:
+            d=dict(r);d['body']=decrypt_text(d['body']);d['attachments']=[dict(x) for x in c.execute('SELECT * FROM attachments WHERE message_id=?',(r['id'],))];d['reads']=reads_for(c,r['id']);out.append(d)
+        thread_owner,help_room_id,help_event_id,help_scope=broadcast_extras(c,scope,scope_id)
+    if newly_read:
+        by_id={d['id']:d for d in out}
+        visible=visible_predicate(scope,scope_id,thread_owner=thread_owner,help_room_id=help_room_id,help_event_id=help_event_id,help_scope=help_scope)
+        for mid in newly_read:
+            await manager.broadcast({'type':'message_updated','message':by_id[mid]},visible=visible)
+    return out
 @app.post('/api/messages')
 async def message_create(x:MessageIn,authorization:str|None=Header(default=None)):
     a=require_actor(authorization)
@@ -685,6 +702,26 @@ def attachment_get(aid:int,authorization:str|None=Header(default=None)):
         if not m or not message_access_ok(a,c,m):raise HTTPException(403)
     return FileResponse(UP/r['stored_name'],media_type=r['mime_type'] or 'application/octet-stream',filename=r['original_name'])
 
+@app.post('/api/messages/read')
+async def mark_messages_read(x:ReadIn,authorization:str|None=Header(default=None)):
+    a=require_actor(authorization)
+    to_broadcast=[]
+    with db() as c:
+        for mid in x.ids:
+            m=c.execute('SELECT id,scope,scope_id,sender_kind,sender_id,priority,to_kind,to_id FROM messages WHERE id=? AND deleted_at IS NULL',(mid,)).fetchone()
+            if not m or (m['sender_kind']==a['kind'] and m['sender_id']==a['id']):continue
+            if not message_access_ok(a,c,m):continue
+            if mark_read(c,a,mid):
+                extras=broadcast_extras(c,m['scope'],m['scope_id']) if m['scope'] in ('emergency_thread','help_thread') else (None,None,None,'room')
+                to_broadcast.append((message_dict(c,mid),dict(m),extras))
+    for d,m,(thread_owner,help_room_id,help_event_id,help_scope) in to_broadcast:
+        if m['scope']=='dm':
+            pair={(m['sender_kind'],m['sender_id']),(m['to_kind'],m['to_id'])}
+            await manager.broadcast({'type':'message_updated','message':d},visible=lambda actor,pair=pair:(actor['kind'],actor['id']) in pair)
+        else:
+            await manager.broadcast({'type':'message_updated','message':d},visible=visible_predicate(m['scope'],m['scope_id'],thread_owner=thread_owner,help_room_id=help_room_id,help_event_id=help_event_id,help_scope=help_scope,priority=m['priority']))
+    return {'ok':True}
+
 @app.get('/api/dm/contacts')
 def dm_contacts(authorization:str|None=Header(default=None)):
     a=require_actor(authorization)
@@ -695,13 +732,19 @@ def dm_contacts(authorization:str|None=Header(default=None)):
         out+=[{'kind':'operator','id':r['id'],'display_name':r['name']} for r in ops if not (a['kind']=='operator' and r['id']==a['id'])]
     return out
 @app.get('/api/dm')
-def dm_thread(with_kind:str,with_id:int,authorization:str|None=Header(default=None)):
+async def dm_thread(with_kind:str,with_id:int,authorization:str|None=Header(default=None)):
     a=require_actor(authorization)
     with db() as c:
-        rows=c.execute("SELECT * FROM messages WHERE scope='dm' AND deleted_at IS NULL AND ((sender_kind=? AND sender_id=? AND to_kind=? AND to_id=?) OR (sender_kind=? AND sender_id=? AND to_kind=? AND to_id=?)) ORDER BY id DESC LIMIT 250",(a['kind'],a['id'],with_kind,with_id,with_kind,with_id,a['kind'],a['id']))
+        rows=list(reversed(c.execute("SELECT * FROM messages WHERE scope='dm' AND deleted_at IS NULL AND ((sender_kind=? AND sender_id=? AND to_kind=? AND to_id=?) OR (sender_kind=? AND sender_id=? AND to_kind=? AND to_id=?)) ORDER BY id DESC LIMIT 250",(a['kind'],a['id'],with_kind,with_id,with_kind,with_id,a['kind'],a['id'])).fetchall()))
+        newly_read=[r['id'] for r in rows if not (r['sender_kind']==a['kind'] and r['sender_id']==a['id']) and mark_read(c,a,r['id'])]
         out=[]
-        for r in reversed(rows.fetchall()):
-            d=dict(r);d['body']=decrypt_text(d['body']);d['attachments']=[dict(x) for x in c.execute('SELECT * FROM attachments WHERE message_id=?',(r['id'],))];out.append(d)
+        for r in rows:
+            d=dict(r);d['body']=decrypt_text(d['body']);d['attachments']=[dict(x) for x in c.execute('SELECT * FROM attachments WHERE message_id=?',(r['id'],))];d['reads']=reads_for(c,r['id']);out.append(d)
+    if newly_read:
+        by_id={d['id']:d for d in out}
+        pair={(a['kind'],a['id']),(with_kind,with_id)}
+        for mid in newly_read:
+            await manager.broadcast({'type':'message_updated','message':by_id[mid]},visible=lambda actor,pair=pair:(actor['kind'],actor['id']) in pair)
     return out
 @app.post('/api/dm')
 async def dm_send(x:DMIn,authorization:str|None=Header(default=None)):
