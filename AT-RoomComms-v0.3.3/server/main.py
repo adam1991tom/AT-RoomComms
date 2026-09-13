@@ -1,4 +1,4 @@
-import os, sqlite3, hashlib, hmac, secrets, uuid, json, asyncio
+import os, re, sqlite3, hashlib, hmac, secrets, uuid, json, asyncio
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from fastapi import FastAPI, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect, Header, Response
@@ -139,6 +139,11 @@ CREATE TABLE IF NOT EXISTS message_reads(message_id INTEGER NOT NULL,actor_kind 
         c.execute("INSERT OR IGNORE INTO settings VALUES('attachment_limit_mb','25')")
         c.execute("INSERT OR IGNORE INTO settings VALUES('daily_logoff_utc','03:00')")
         c.execute("INSERT OR IGNORE INTO settings VALUES('ui_theme','blue')")
+        c.execute("INSERT OR IGNORE INTO settings VALUES('ui_accent','')")
+        c.execute("INSERT OR IGNORE INTO settings VALUES('feed_limit','250')")
+        c.execute("INSERT OR IGNORE INTO settings VALUES('status_labels','{}')")
+        c.execute("INSERT OR IGNORE INTO settings VALUES('priority_labels','{}')")
+        c.execute("INSERT OR IGNORE INTO settings VALUES('help_categories','Presentation,Video,Audio,Lighting,Network,Room Setup,Speaker Support,Other')")
         # Deliberately do NOT seed passwords. Existing v0.3.2 installations have no
         # setup_complete key, so the first-run wizard will repair the privileged accounts.
 init()
@@ -340,7 +345,8 @@ def bootstrap(authorization:str|None=Header(default=None)):
             room=c.execute('SELECT * FROM rooms WHERE id=?',(a['room_id'],)).fetchone()
             event=c.execute('SELECT * FROM events WHERE id=?',(a['event_id'],)).fetchone()
             help_requests=[dict(r) for r in c.execute("SELECT * FROM help_requests WHERE (room_id=? OR scope='venue' OR (scope='event' AND event_id=?)) AND status NOT IN ('resolved','cancelled') ORDER BY id DESC",(a['room_id'],a['event_id']))]
-            return {'version':VERSION,'me':a,'settings':{'venue_name':setting(c,'venue_name'),'control_centre_name':setting(c,'control_centre_name'),'ui_theme':setting(c,'ui_theme','blue')},'room':dict(room) if room else None,'event':dict(event) if event else None,'help_requests':help_requests}
+            op_settings={'venue_name':setting(c,'venue_name'),'control_centre_name':setting(c,'control_centre_name'),'ui_theme':setting(c,'ui_theme','blue'),'ui_accent':setting(c,'ui_accent',''),'status_labels':setting(c,'status_labels','{}'),'priority_labels':setting(c,'priority_labels','{}'),'help_categories':setting(c,'help_categories','Presentation,Video,Audio,Lighting,Network,Room Setup,Speaker Support,Other')}
+            return {'version':VERSION,'me':a,'settings':op_settings,'room':dict(room) if room else None,'event':dict(event) if event else None,'help_requests':help_requests}
         rooms=[dict(r) for r in c.execute('SELECT * FROM rooms WHERE enabled=1 ORDER BY event_id,name')]
         presence={r['id']:manager.room_presence(r['id']) for r in rooms}
         return {'version':VERSION,'me':a,'settings':{r['key']:r['value'] for r in c.execute('SELECT * FROM settings')},'rooms':rooms,'presence':presence,'events':[dict(r) for r in c.execute('SELECT * FROM events WHERE archived=0 ORDER BY starts_at,name')],'operators':[dict(r) for r in c.execute('SELECT * FROM operators WHERE active=1 ORDER BY name')],'devices':[dict(r) for r in c.execute('SELECT * FROM devices ORDER BY name')],'help_requests':[dict(r) for r in c.execute("SELECT * FROM help_requests WHERE status NOT IN ('resolved','cancelled') ORDER BY id DESC")]}
@@ -572,8 +578,10 @@ def account_disable(aid:int,authorization:str|None=Header(default=None)):
 
 @app.patch('/api/settings')
 def settings_update(p:dict,authorization:str|None=Header(default=None)):
-    a=require_auth(authorization);require_admin(a);allowed={'venue_name','control_centre_name','daily_logoff_utc','ui_theme'}
+    a=require_auth(authorization);require_admin(a)
+    allowed={'venue_name','control_centre_name','daily_logoff_utc','ui_theme','ui_accent','attachment_limit_mb','feed_limit','status_labels','priority_labels','help_categories'}
     if 'ui_theme' in p and p['ui_theme'] not in ('blue','purple','green','orange'):raise HTTPException(400,'Invalid theme')
+    if p.get('ui_accent') and not re.fullmatch(r'#[0-9a-fA-F]{6}',p['ui_accent']):raise HTTPException(400,'Invalid accent colour')
     with db() as c:
         for k,v in p.items():
             if k in allowed:c.execute('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',(k,str(v)))
@@ -597,7 +605,9 @@ async def messages(scope:str,scope_id:int|None=None,authorization:str|None=Heade
     a=require_actor(authorization)
     with db() as c:
         if not actor_can_access(a,c,scope,scope_id):raise HTTPException(403,'No access to this feed')
-        rows=list(reversed((c.execute("SELECT * FROM messages WHERE scope='venue' AND deleted_at IS NULL ORDER BY id DESC LIMIT 250") if scope=='venue' else c.execute('SELECT * FROM messages WHERE scope=? AND scope_id=? AND deleted_at IS NULL ORDER BY id DESC LIMIT 250',(scope,scope_id))).fetchall()))
+        try:lim=max(20,min(2000,int(setting(c,'feed_limit','250'))))
+        except Exception:lim=250
+        rows=list(reversed((c.execute("SELECT * FROM messages WHERE scope='venue' AND deleted_at IS NULL ORDER BY id DESC LIMIT ?",(lim,)) if scope=='venue' else c.execute('SELECT * FROM messages WHERE scope=? AND scope_id=? AND deleted_at IS NULL ORDER BY id DESC LIMIT ?',(scope,scope_id,lim))).fetchall()))
         newly_read=[r['id'] for r in rows if not (r['sender_kind']==a['kind'] and r['sender_id']==a['id']) and mark_read(c,a,r['id'])]
         out=[]
         for r in rows:
@@ -676,10 +686,16 @@ async def attachment_add(mid:int,file:UploadFile=File(...),authorization:str|Non
         m=c.execute('SELECT * FROM messages WHERE id=? AND deleted_at IS NULL',(mid,)).fetchone()
         if not m:raise HTTPException(404,'Message not found')
         if not message_access_ok(a,c,m):raise HTTPException(403,'No access to this feed')
+    with db() as c:
+        try:lim_mb=int(setting(c,'attachment_limit_mb','25'))
+        except Exception:lim_mb=25
     safe=''.join(ch for ch in (file.filename or 'file') if ch.isalnum() or ch in '._- ')[:180] or 'file';stored=uuid.uuid4().hex+'_'+safe;dest=UP/stored;size=0
     with dest.open('wb') as f:
         while chunk:=await file.read(1024*1024):
             size+=len(chunk)
+            if size>lim_mb*1024*1024:
+                f.close();dest.unlink(missing_ok=True)
+                raise HTTPException(413,f'Attachment exceeds the {lim_mb}MB limit')
             f.write(chunk)
     with db() as c:
         c.execute('INSERT INTO attachments(message_id,original_name,stored_name,mime_type,size) VALUES(?,?,?,?,?)',(mid,file.filename or safe,stored,file.content_type or '',size))
@@ -735,7 +751,9 @@ def dm_contacts(authorization:str|None=Header(default=None)):
 async def dm_thread(with_kind:str,with_id:int,authorization:str|None=Header(default=None)):
     a=require_actor(authorization)
     with db() as c:
-        rows=list(reversed(c.execute("SELECT * FROM messages WHERE scope='dm' AND deleted_at IS NULL AND ((sender_kind=? AND sender_id=? AND to_kind=? AND to_id=?) OR (sender_kind=? AND sender_id=? AND to_kind=? AND to_id=?)) ORDER BY id DESC LIMIT 250",(a['kind'],a['id'],with_kind,with_id,with_kind,with_id,a['kind'],a['id'])).fetchall()))
+        try:lim=max(20,min(2000,int(setting(c,'feed_limit','250'))))
+        except Exception:lim=250
+        rows=list(reversed(c.execute("SELECT * FROM messages WHERE scope='dm' AND deleted_at IS NULL AND ((sender_kind=? AND sender_id=? AND to_kind=? AND to_id=?) OR (sender_kind=? AND sender_id=? AND to_kind=? AND to_id=?)) ORDER BY id DESC LIMIT ?",(a['kind'],a['id'],with_kind,with_id,with_kind,with_id,a['kind'],a['id'],lim)).fetchall()))
         newly_read=[r['id'] for r in rows if not (r['sender_kind']==a['kind'] and r['sender_id']==a['id']) and mark_read(c,a,r['id'])]
         out=[]
         for r in rows:
