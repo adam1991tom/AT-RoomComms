@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400">
+  <title>AT RoomComms</title>
+  <defs>
+    <linearGradient id="gearGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#57CBF5"/>
+      <stop offset="55%" stop-color="#1EA0DC"/>
+      <stop offset="100%" stop-color="#0C6E9C"/>
+    </linearGradient>
+    <radialGradient id="bubbleGrad" cx="38%" cy="30%" r="75%">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#EEF1F7"/>
+    </radialGradient>
+    <filter id="lift" x="-40%" y="-40%" width="180%" height="180%">
+      <feDropShadow dx="0" dy="7" stdDeviation="10" flood-color="#04050a" flood-opacity="0.4"/>
+    </filter>
+  </defs>
+
+  <g filter="url(#lift)">
+    <!-- black silhouette (oversized, forms the outline) -->
+    <g fill="#0B0B0E">
+      <circle cx="200" cy="200" r="167"/>
+      <g>
+        <path d="M 173,40 L 176.6,16.9 Q 178,8 187,8 L 213,8 Q 222,8 223.4,16.9 L 227,40 Z"/>
+        <path d="M 173,40 L 176.6,16.9 Q 178,8 187,8 L 213,8 Q 222,8 223.4,16.9 L 227,40 Z" transform="rotate(36 200 200)"/>
+        <path d="M 173,40 L 176.6,16.9 Q 178,8 187,8 L 213,8 Q 222,8 223.4,16.9 L 227,40 Z" transform="rotate(72 200 200)"/>
+        <path d="M 173,40 L 176.6,16.9 Q 178,8 187,8 L 213,8 Q 222,8 223.4,16.9 L 227,40 Z" transform="rotate(108 200 200)"/>
+        <path d="M 173,40 L 176.6,16.9 Q 178,8 187,8 L 213,8 Q 222,8 223.4,16.9 L 227,40 Z" transform="rotate(144 200 200)"/>
+        <path d="M 173,40 L 176.6,16.9 Q 178,8 187,8 L 213,8 Q 222,8 223.4,16.9 L 227,40 Z" transform="rotate(180 200 200)"/>
+        <path d="M 173,40 L 176.6,16.9 Q 178,8 187,8 L 213,8 Q 222,8 223.4,16.9 L 227,40 Z" transform="rotate(216 200 200)"/>
+        <path d="M 173,40 L 176.6,16.9 Q 178,8 187,8 L 213,8 Q 222,8 223.4,16.9 L 227,40 Z" transform="rotate(252 200 200)"/>
+        <path d="M 173,40 L 176.6,16.9 Q 178,8 187,8 L 213,8 Q 222,8 223.4,16.9 L 227,40 Z" transform="rotate(288 200 200)"/>
+        <path d="M 173,40 L 176.6,16.9 Q 178,8 187,8 L 213,8 Q 222,8 223.4,16.9 L 227,40 Z" transform="rotate(324 200 200)"/>
+      </g>
+    </g>
+
+    <!-- gear teeth + hub, gradient fill for depth -->
+    <g fill="url(#gearGrad)">
+      <circle cx="200" cy="200" r="160"/>
+      <g>
+        <path d="M 180,40 L 183.8,20.9 Q 185,15 191,15 L 209,15 Q 215,15 216.2,20.9 L 220,40 Z"/>
+        <path d="M 180,40 L 183.8,20.9 Q 185,15 191,15 L 209,15 Q 215,15 216.2,20.9 L 220,40 Z" transform="rotate(36 200 200)"/>
+        <path d="M 180,40 L 183.8,20.9 Q 185,15 191,15 L 209,15 Q 215,15 216.2,20.9 L 220,40 Z" transform="rotate(72 200 200)"/>
+        <path d="M 180,40 L 183.8,20.9 Q 185,15 191,15 L 209,15 Q 215,15 216.2,20.9 L 220,40 Z" transform="rotate(108 200 200)"/>
+        <path d="M 180,40 L 183.8,20.9 Q 185,15 191,15 L 209,15 Q 215,15 216.2,20.9 L 220,40 Z" transform="rotate(144 200 200)"/>
+        <path d="M 180,40 L 183.8,20.9 Q 185,15 191,15 L 209,15 Q 215,15 216.2,20.9 L 220,40 Z" transform="rotate(180 200 200)"/>
+        <path d="M 180,40 L 183.8,20.9 Q 185,15 191,15 L 209,15 Q 215,15 216.2,20.9 L 220,40 Z" transform="rotate(216 200 200)"/>
+        <path d="M 180,40 L 183.8,20.9 Q 185,15 191,15 L 209,15 Q 215,15 216.2,20.9 L 220,40 Z" transform="rotate(252 200 200)"/>
+        <path d="M 180,40 L 183.8,20.9 Q 185,15 191,15 L 209,15 Q 215,15 216.2,20.9 L 220,40 Z" transform="rotate(288 200 200)"/>
+        <path d="M 180,40 L 183.8,20.9 Q 185,15 191,15 L 209,15 Q 215,15 216.2,20.9 L 220,40 Z" transform="rotate(324 200 200)"/>
+      </g>
+    </g>
+
+    <!-- black ring border / hole punch -->
+    <circle cx="200" cy="200" r="140" fill="#0B0B0E"/>
+
+    <!-- speech-bubble face -->
+    <circle cx="200" cy="188" r="98" fill="url(#bubbleGrad)"/>
+    <path d="M 183,270 Q 189,300 193,309 Q 197,300 205,270 Z" fill="url(#bubbleGrad)"/>
+
+    <!-- AT monogram -->
+    <text x="197" y="220" text-anchor="middle" font-family="'Segoe UI',system-ui,Arial,sans-serif" font-weight="800" font-size="112" fill="#0B0B0E" letter-spacing="-3">AT</text>
+  </g>
+</svg>

@@ -1,18 +1,56 @@
-import os, sqlite3, hashlib, hmac, secrets, uuid
+import os, re, sqlite3, hashlib, hmac, secrets, uuid, json, asyncio
 from pathlib import Path
-from datetime import datetime, timezone
-from fastapi import FastAPI, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect, Header
+from datetime import datetime, timezone, timedelta
+from fastapi import FastAPI, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect, Header, Response
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from cryptography.fernet import Fernet, InvalidToken
+from io import BytesIO
+from xml.sax.saxutils import escape as pdf_esc
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 
-VERSION='0.3.3'
+VERSION='0.9.2'
 DATA=Path(os.getenv('ROOMCOMMS_DATA','/data')); DB=DATA/'roomcomms.db'; UP=DATA/'uploads'
 DATA.mkdir(parents=True,exist_ok=True); UP.mkdir(exist_ok=True)
+KEY_FILE=DATA/'.encryption_key'
+if not KEY_FILE.exists():
+    KEY_FILE.write_bytes(Fernet.generate_key())
+    try: os.chmod(KEY_FILE,0o600)
+    except OSError: pass
+_fernet=Fernet(KEY_FILE.read_bytes())
+def encrypt_text(v):
+    if v is None: return v
+    return _fernet.encrypt(v.encode()).decode()
+def decrypt_text(v):
+    if v is None: return v
+    try: return _fernet.decrypt(v.encode()).decode()
+    except (InvalidToken, ValueError): return v
 app=FastAPI(title='AT RoomComms',version=VERSION)
 app.mount('/static',StaticFiles(directory=Path(__file__).parent/'static'),name='static')
 
 def now(): return datetime.now(timezone.utc).isoformat()
+
+class ConnectionManager:
+    def __init__(self):self.conns={}
+    async def connect(self,ws,actor):await ws.accept();self.conns[ws]=actor
+    def disconnect(self,ws):self.conns.pop(ws,None)
+    async def broadcast(self,payload,visible=None):
+        dead=[]
+        for ws,actor in list(self.conns.items()):
+            if visible and not visible(actor):continue
+            try:await ws.send_text(json.dumps(payload))
+            except Exception:dead.append(ws)
+        for ws in dead:self.conns.pop(ws,None)
+    def room_presence(self,room_id):
+        roles={a['device_role'] for a in self.conns.values() if a['kind']=='operator' and a['room_id']==room_id}
+        return {'main':'main' in roles,'backup':'backup' in roles}
+manager=ConnectionManager()
+
 def db():
     c=sqlite3.connect(DB); c.row_factory=sqlite3.Row; c.execute('PRAGMA foreign_keys=ON'); return c
 
@@ -37,6 +75,19 @@ def setup_complete(c=None):
     finally:
         if own:c.close()
 
+def last_cutoff(hhmm):
+    try: h,m=[int(x) for x in hhmm.split(':',1)]
+    except Exception: h,m=3,0
+    n=datetime.now(timezone.utc)
+    candidate=n.replace(hour=h,minute=m,second=0,microsecond=0)
+    if candidate>n:candidate-=timedelta(days=1)
+    return candidate
+def next_cutoff(hhmm):
+    return last_cutoff(hhmm)+timedelta(days=1)
+def is_expired(created_at_iso,cutoff_dt):
+    try:return datetime.fromisoformat(created_at_iso)<cutoff_dt
+    except Exception:return False
+
 def init():
     with db() as c:
         c.executescript('''
@@ -44,6 +95,7 @@ CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY AUTOINCREMENT,username TEXT UNIQUE NOT NULL,password_hash TEXT NOT NULL,display_name TEXT NOT NULL,role TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 1);
 CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY,account_id INTEGER NOT NULL,created_at TEXT NOT NULL,FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS operators(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE NOT NULL,active INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS operator_sessions(token TEXT PRIMARY KEY,operator_id INTEGER NOT NULL,event_id INTEGER,room_id INTEGER,device_role TEXT DEFAULT 'main',device_name TEXT DEFAULT '',created_at TEXT NOT NULL,FOREIGN KEY(operator_id) REFERENCES operators(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS rooms(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE NOT NULL,short_name TEXT DEFAULT '',current_status TEXT DEFAULT 'closed',enabled INTEGER DEFAULT 1);
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,client TEXT DEFAULT '',event_color TEXT DEFAULT '#8b5cf6',starts_at TEXT DEFAULT '',ends_at TEXT DEFAULT '',event_status TEXT DEFAULT 'scheduled',archived INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS event_rooms(event_id INTEGER NOT NULL,room_id INTEGER NOT NULL,operator_name TEXT DEFAULT '',PRIMARY KEY(event_id,room_id),FOREIGN KEY(event_id) REFERENCES events(id) ON DELETE CASCADE,FOREIGN KEY(room_id) REFERENCES rooms(id) ON DELETE CASCADE);
@@ -51,12 +103,47 @@ CREATE TABLE IF NOT EXISTS devices(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEX
 CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY AUTOINCREMENT,scope TEXT,scope_id INTEGER,sender TEXT,body TEXT,priority TEXT,created_at TEXT);
 CREATE TABLE IF NOT EXISTS attachments(id INTEGER PRIMARY KEY AUTOINCREMENT,message_id INTEGER,original_name TEXT,stored_name TEXT,mime_type TEXT,size INTEGER);
 CREATE TABLE IF NOT EXISTS help_requests(id INTEGER PRIMARY KEY AUTOINCREMENT,event_id INTEGER,room_id INTEGER,room_name TEXT,requested_by TEXT,category TEXT,description TEXT,priority TEXT,status TEXT,assigned_to TEXT,created_at TEXT,acknowledged_at TEXT,resolved_at TEXT);
+CREATE TABLE IF NOT EXISTS issues(id INTEGER PRIMARY KEY AUTOINCREMENT,reporter_name TEXT,reporter_kind TEXT,category TEXT,description TEXT,status TEXT DEFAULT 'open',created_at TEXT,resolved_at TEXT);
+CREATE TABLE IF NOT EXISTS message_reads(message_id INTEGER NOT NULL,actor_kind TEXT NOT NULL,actor_id INTEGER NOT NULL,display_name TEXT NOT NULL,read_at TEXT NOT NULL,PRIMARY KEY(message_id,actor_kind,actor_id),FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE);
 ''')
         cols=[r['name'] for r in c.execute('PRAGMA table_info(event_rooms)')]
         if 'operator_name' not in cols:c.execute("ALTER TABLE event_rooms ADD COLUMN operator_name TEXT DEFAULT ''")
+        mcols=[r['name'] for r in c.execute('PRAGMA table_info(messages)')]
+        if 'sender_id' not in mcols:c.execute('ALTER TABLE messages ADD COLUMN sender_id INTEGER')
+        if 'edited_at' not in mcols:c.execute('ALTER TABLE messages ADD COLUMN edited_at TEXT')
+        if 'deleted_at' not in mcols:c.execute('ALTER TABLE messages ADD COLUMN deleted_at TEXT')
+        if 'sender_kind' not in mcols:c.execute("ALTER TABLE messages ADD COLUMN sender_kind TEXT DEFAULT 'account'")
+        if 'to_kind' not in mcols:c.execute('ALTER TABLE messages ADD COLUMN to_kind TEXT')
+        if 'to_id' not in mcols:c.execute('ALTER TABLE messages ADD COLUMN to_id INTEGER')
+        if 'help_request_id' not in mcols:c.execute('ALTER TABLE messages ADD COLUMN help_request_id INTEGER')
+        hcols=[r['name'] for r in c.execute('PRAGMA table_info(help_requests)')]
+        if 'broadcast' not in hcols:c.execute('ALTER TABLE help_requests ADD COLUMN broadcast INTEGER DEFAULT 0')
+        if 'scope' not in hcols:
+            c.execute("ALTER TABLE help_requests ADD COLUMN scope TEXT DEFAULT 'room'")
+            c.execute("UPDATE help_requests SET scope='venue' WHERE broadcast=1")
+        dcols=[r['name'] for r in c.execute('PRAGMA table_info(devices)')]
+        if 'presenting' not in dcols:c.execute('ALTER TABLE devices ADD COLUMN presenting INTEGER DEFAULT 0')
+        if 'uptime_seconds' not in dcols:c.execute('ALTER TABLE devices ADD COLUMN uptime_seconds INTEGER DEFAULT 0')
+        if 'diagnostics' not in dcols:c.execute("ALTER TABLE devices ADD COLUMN diagnostics TEXT DEFAULT '{}'")
+        rcols=[r['name'] for r in c.execute('PRAGMA table_info(rooms)')]
+        if 'event_id' not in rcols:
+            c.execute('ALTER TABLE rooms ADD COLUMN event_id INTEGER')
+            c.execute('ALTER TABLE rooms ADD COLUMN operator_name TEXT DEFAULT \'\'')
+            # Rooms used to be a shared library assigned to events via event_rooms.
+            # Fold that into a direct one-event ownership: each room now belongs to
+            # whichever event it was (most recently) assigned to.
+            for row in c.execute('SELECT room_id,event_id,operator_name FROM event_rooms er WHERE er.event_id=(SELECT MAX(event_id) FROM event_rooms WHERE room_id=er.room_id)'):
+                c.execute('UPDATE rooms SET event_id=?,operator_name=? WHERE id=?',(row['event_id'],row['operator_name'] or '',row['room_id']))
         c.execute("INSERT OR IGNORE INTO settings VALUES('venue_name','Harrogate Convention Centre')")
         c.execute("INSERT OR IGNORE INTO settings VALUES('control_centre_name','Speaker Preview')")
         c.execute("INSERT OR IGNORE INTO settings VALUES('attachment_limit_mb','25')")
+        c.execute("INSERT OR IGNORE INTO settings VALUES('daily_logoff_utc','03:00')")
+        c.execute("INSERT OR IGNORE INTO settings VALUES('ui_theme','blue')")
+        c.execute("INSERT OR IGNORE INTO settings VALUES('ui_accent','')")
+        c.execute("INSERT OR IGNORE INTO settings VALUES('feed_limit','250')")
+        c.execute("INSERT OR IGNORE INTO settings VALUES('status_labels','{}')")
+        c.execute("INSERT OR IGNORE INTO settings VALUES('priority_labels','{}')")
+        c.execute("INSERT OR IGNORE INTO settings VALUES('help_categories','Presentation,Video,Audio,Lighting,Network,Room Setup,Speaker Support,Other')")
         # Deliberately do NOT seed passwords. Existing v0.3.2 installations have no
         # setup_complete key, so the first-run wizard will repair the privileged accounts.
 init()
@@ -72,32 +159,108 @@ class SetupIn(BaseModel):
     speaker_password:str
 class Login(BaseModel): username:str; password:str
 class EventIn(BaseModel): name:str; client:str=''; event_color:str='#8b5cf6'; starts_at:str=''; ends_at:str=''; event_status:str='scheduled'
-class RoomIn(BaseModel): name:str; short_name:str=''; current_status:str='closed'
+class RoomIn(BaseModel): name:str; short_name:str=''; current_status:str='closed'; event_id:int|None=None; operator_name:str=''
 class OperatorIn(BaseModel): name:str
 class AccountIn(BaseModel): username:str; password:str; display_name:str; role:str='speaker_preview'
 class PasswordIn(BaseModel): password:str
-class MessageIn(BaseModel): scope:str; scope_id:int|None=None; sender:str=''; body:str=''; priority:str='normal'
+class MessageIn(BaseModel): scope:str; scope_id:int|None=None; body:str=''; priority:str='normal'
+class MessageEdit(BaseModel): body:str
 class DeviceIn(BaseModel): name:str; role:str='general'; room_id:int|None=None; event_id:int|None=None; operator:str=''; app_version:str=''
-class HelpIn(BaseModel): event_id:int|None=None; room_id:int|None=None; requested_by:str; category:str; description:str; priority:str='important'
+class HelpIn(BaseModel): event_id:int|None=None; room_id:int|None=None; requested_by:str=''; category:str; description:str; priority:str='important'; scope:str='room'
+class IssueIn(BaseModel): category:str; description:str
+class OperatorLoginIn(BaseModel): operator_id:int; event_id:int; room_id:int; device_role:str='main'; device_name:str=''
+class DMIn(BaseModel): to_kind:str; to_id:int; body:str
+class ReadIn(BaseModel): ids:list[int]
+
+def account_for_token(token:str):
+    with db() as c:
+        r=c.execute('SELECT a.id,a.username,a.display_name,a.role,a.active,s.created_at FROM sessions s JOIN accounts a ON a.id=s.account_id WHERE s.token=?',(token,)).fetchone()
+        if not r or not r['active']:return None
+        cutoff=last_cutoff(setting(c,'daily_logoff_utc','03:00'))
+        if is_expired(r['created_at'],cutoff):
+            c.execute('DELETE FROM sessions WHERE token=?',(token,))
+            return None
+    d=dict(r);d.pop('created_at',None);d['kind']='account';d['room_id']=None;d['event_id']=None;d['device_role']=None
+    return d
+
+def operator_for_token(token:str):
+    with db() as c:
+        r=c.execute('SELECT os.operator_id,os.event_id,os.room_id,os.device_role,os.device_name,os.created_at,o.name,o.active FROM operator_sessions os JOIN operators o ON o.id=os.operator_id WHERE os.token=?',(token,)).fetchone()
+        if not r or not r['active']:return None
+        cutoff=last_cutoff(setting(c,'daily_logoff_utc','03:00'))
+        if is_expired(r['created_at'],cutoff):
+            c.execute('DELETE FROM operator_sessions WHERE token=?',(token,))
+            return None
+    return {'kind':'operator','id':r['operator_id'],'username':None,'display_name':r['name'],'role':None,'active':1,'room_id':r['room_id'],'event_id':r['event_id'],'device_role':r['device_role'],'device_name':r['device_name']}
+
+def actor_for_token(token:str):
+    return account_for_token(token) or operator_for_token(token)
 
 def require_auth(authorization:str|None):
     if not setup_complete():raise HTTPException(503,'First run setup required')
     if not authorization or not authorization.lower().startswith('bearer '):raise HTTPException(401,'Login required')
     token=authorization.split(' ',1)[1].strip()
-    with db() as c:r=c.execute('SELECT a.id,a.username,a.display_name,a.role,a.active FROM sessions s JOIN accounts a ON a.id=s.account_id WHERE s.token=?',(token,)).fetchone()
-    if not r or not r['active']:raise HTTPException(401,'Session invalid')
-    return dict(r)
+    a=account_for_token(token)
+    if not a:raise HTTPException(401,'Session invalid')
+    return a
+def require_actor(authorization:str|None):
+    if not setup_complete():raise HTTPException(503,'First run setup required')
+    if not authorization or not authorization.lower().startswith('bearer '):raise HTTPException(401,'Login required')
+    token=authorization.split(' ',1)[1].strip()
+    a=actor_for_token(token)
+    if not a:raise HTTPException(401,'Session invalid')
+    return a
 def require_manager(a):
     if a['role'] not in ('admin','speaker_preview'):raise HTTPException(403,'Manager permission required')
 def require_admin(a):
     if a['role']!='admin':raise HTTPException(403,'Administrator permission required')
 
+def actor_can_access(actor,c,scope,scope_id):
+    if actor['kind']=='account':return True
+    if scope=='room':return scope_id==actor['room_id']
+    if scope=='emergency_thread':
+        orig=c.execute('SELECT sender_kind,sender_id FROM messages WHERE id=?',(scope_id,)).fetchone()
+        return bool(orig) and orig['sender_kind']=='operator' and orig['sender_id']==actor['id']
+    if scope=='help_thread':
+        hr=c.execute('SELECT room_id,event_id,scope FROM help_requests WHERE id=?',(scope_id,)).fetchone()
+        return bool(hr) and (hr['room_id']==actor['room_id'] or hr['scope']=='venue' or (hr['scope']=='event' and hr['event_id']==actor['event_id']))
+    return False
+def message_access_ok(actor,c,m):
+    if m['scope']=='dm':
+        return (m['sender_kind'],m['sender_id'])==(actor['kind'],actor['id']) or (m['to_kind'],m['to_id'])==(actor['kind'],actor['id'])
+    return actor_can_access(actor,c,m['scope'],m['scope_id'])
+def broadcast_extras(c,scope,scope_id):
+    thread_owner=None;help_room_id=None;help_event_id=None;help_scope='room'
+    if scope=='emergency_thread':
+        orig=c.execute('SELECT sender_kind,sender_id FROM messages WHERE id=?',(scope_id,)).fetchone()
+        if orig:thread_owner=(orig['sender_kind'],orig['sender_id'])
+    elif scope=='help_thread':
+        hr=c.execute('SELECT room_id,event_id,scope FROM help_requests WHERE id=?',(scope_id,)).fetchone()
+        if hr:help_room_id=hr['room_id'];help_event_id=hr['event_id'];help_scope=hr['scope'] or 'room'
+    return thread_owner,help_room_id,help_event_id,help_scope
+def visible_predicate(scope,scope_id,thread_owner=None,help_room_id=None,help_event_id=None,help_scope='room',priority=None):
+    if scope=='room':
+        if priority=='emergency':return lambda actor:True
+        return lambda actor:actor['kind']=='account' or (actor['kind']=='operator' and actor['room_id']==scope_id)
+    if scope=='emergency_thread':
+        return lambda actor:actor['kind']=='account' or (actor['kind']=='operator' and thread_owner==(actor['kind'],actor['id']))
+    if scope=='help_thread':
+        if help_scope=='venue':return lambda actor:True
+        if help_scope=='event':return lambda actor:actor['kind']=='account' or (actor['kind']=='operator' and actor['event_id']==help_event_id)
+        return lambda actor:actor['kind']=='account' or (actor['kind']=='operator' and actor['room_id']==help_room_id)
+    return lambda actor:actor['kind']=='account'
+
 @app.get('/',response_class=HTMLResponse)
-def home():return HTMLResponse((Path(__file__).parent/'static'/'index.html').read_text(encoding='utf-8'))
+def home():
+    html=(Path(__file__).parent/'static'/'index.html').read_text(encoding='utf-8')
+    html=html.replace('app.css"','app.css?v='+VERSION+'"').replace('app.js"','app.js?v='+VERSION+'"')
+    return HTMLResponse(html,headers={'Cache-Control':'no-store, must-revalidate'})
 @app.get('/api/health')
 def health():return {'status':'ok','version':VERSION}
 @app.get('/api/setup/status')
-def setup_status():return {'needs_setup':not setup_complete(),'version':VERSION}
+def setup_status():
+    with db() as c:theme=setting(c,'ui_theme','blue')
+    return {'needs_setup':not setup_complete(),'version':VERSION,'theme':theme}
 @app.post('/api/setup/complete')
 def finish_setup(x:SetupIn):
     with db() as c:
@@ -131,12 +294,62 @@ def logout(authorization:str|None=Header(default=None)):
         with db() as c:c.execute('DELETE FROM sessions WHERE token=?',(authorization.split(' ',1)[1].strip(),))
     return {'ok':True}
 @app.get('/api/auth/me')
-def me(authorization:str|None=Header(default=None)):return require_auth(authorization)
+def me(authorization:str|None=Header(default=None)):return require_actor(authorization)
+
+@app.get('/api/operator/login-options')
+def operator_login_options():
+    if not setup_complete():raise HTTPException(503,'First run setup required')
+    with db() as c:
+        operators=[dict(r) for r in c.execute('SELECT id,name FROM operators WHERE active=1 ORDER BY name')]
+        events=[]
+        for e in c.execute('SELECT * FROM events WHERE archived=0 ORDER BY starts_at,name'):
+            rooms=[dict(r) for r in c.execute('SELECT id,name,short_name FROM rooms WHERE event_id=? AND enabled=1 ORDER BY name',(e['id'],))]
+            events.append({**dict(e),'rooms':rooms})
+    return {'operators':operators,'events':events}
+@app.post('/api/operator/login')
+async def operator_login(x:OperatorLoginIn):
+    if not setup_complete():raise HTTPException(503,'First run setup required')
+    if x.device_role not in ('main','backup'):raise HTTPException(400,'Invalid device role')
+    with db() as c:
+        op=c.execute('SELECT * FROM operators WHERE id=? AND active=1',(x.operator_id,)).fetchone()
+        if not op:raise HTTPException(404,'Operator not found')
+        if not c.execute('SELECT 1 FROM events WHERE id=? AND archived=0',(x.event_id,)).fetchone():raise HTTPException(404,'Event not found')
+        if not c.execute('SELECT 1 FROM rooms WHERE id=? AND enabled=1 AND event_id=?',(x.room_id,x.event_id)).fetchone():raise HTTPException(400,'That room is not part of that event')
+        token=secrets.token_urlsafe(32)
+        c.execute('INSERT INTO operator_sessions(token,operator_id,event_id,room_id,device_role,device_name,created_at) VALUES(?,?,?,?,?,?,?)',(token,op['id'],x.event_id,x.room_id,x.device_role,x.device_name.strip(),now()))
+        c.execute('UPDATE rooms SET operator_name=? WHERE id=?',(op['name'],x.room_id))
+        room=dict(c.execute('SELECT * FROM rooms WHERE id=?',(x.room_id,)).fetchone())
+    await manager.broadcast({'type':'room_updated','room':room},visible=lambda actor:actor['kind']=='account')
+    return {'token':token,'user':{'id':op['id'],'display_name':op['name'],'kind':'operator','room_id':x.room_id,'event_id':x.event_id,'device_role':x.device_role}}
+@app.post('/api/operator/logout')
+def operator_logout(authorization:str|None=Header(default=None)):
+    if authorization and authorization.lower().startswith('bearer '):
+        with db() as c:c.execute('DELETE FROM operator_sessions WHERE token=?',(authorization.split(' ',1)[1].strip(),))
+    return {'ok':True}
+
+@app.get('/api/speaker-preview')
+def speaker_preview(authorization:str|None=Header(default=None)):
+    require_actor(authorization)
+    with db() as c:
+        rooms=[dict(r) for r in c.execute('SELECT * FROM rooms WHERE enabled=1 ORDER BY event_id,name')]
+        presence={r['id']:manager.room_presence(r['id']) for r in rooms}
+        events=[dict(r) for r in c.execute('SELECT * FROM events WHERE archived=0 ORDER BY starts_at,name')]
+        venue_name=setting(c,'venue_name')
+    return {'venue_name':venue_name,'events':events,'rooms':rooms,'presence':presence}
 
 @app.get('/api/bootstrap')
 def bootstrap(authorization:str|None=Header(default=None)):
-    a=require_auth(authorization)
-    with db() as c:return {'version':VERSION,'me':a,'settings':{r['key']:r['value'] for r in c.execute('SELECT * FROM settings')},'rooms':[dict(r) for r in c.execute('SELECT * FROM rooms WHERE enabled=1 ORDER BY name')],'events':[dict(r) for r in c.execute('SELECT * FROM events WHERE archived=0 ORDER BY starts_at,name')],'event_rooms':[dict(r) for r in c.execute('SELECT * FROM event_rooms')],'operators':[dict(r) for r in c.execute('SELECT * FROM operators WHERE active=1 ORDER BY name')],'devices':[dict(r) for r in c.execute('SELECT * FROM devices ORDER BY name')],'help_requests':[dict(r) for r in c.execute("SELECT * FROM help_requests WHERE status NOT IN ('resolved','cancelled') ORDER BY id DESC")]}
+    a=require_actor(authorization)
+    with db() as c:
+        if a['kind']=='operator':
+            room=c.execute('SELECT * FROM rooms WHERE id=?',(a['room_id'],)).fetchone()
+            event=c.execute('SELECT * FROM events WHERE id=?',(a['event_id'],)).fetchone()
+            help_requests=[dict(r) for r in c.execute("SELECT * FROM help_requests WHERE (room_id=? OR scope='venue' OR (scope='event' AND event_id=?)) AND status NOT IN ('resolved','cancelled') ORDER BY id DESC",(a['room_id'],a['event_id']))]
+            op_settings={'venue_name':setting(c,'venue_name'),'control_centre_name':setting(c,'control_centre_name'),'ui_theme':setting(c,'ui_theme','blue'),'ui_accent':setting(c,'ui_accent',''),'status_labels':setting(c,'status_labels','{}'),'priority_labels':setting(c,'priority_labels','{}'),'help_categories':setting(c,'help_categories','Presentation,Video,Audio,Lighting,Network,Room Setup,Speaker Support,Other')}
+            return {'version':VERSION,'me':a,'settings':op_settings,'room':dict(room) if room else None,'event':dict(event) if event else None,'help_requests':help_requests}
+        rooms=[dict(r) for r in c.execute('SELECT * FROM rooms WHERE enabled=1 ORDER BY event_id,name')]
+        presence={r['id']:manager.room_presence(r['id']) for r in rooms}
+        return {'version':VERSION,'me':a,'settings':{r['key']:r['value'] for r in c.execute('SELECT * FROM settings')},'rooms':rooms,'presence':presence,'events':[dict(r) for r in c.execute('SELECT * FROM events WHERE archived=0 ORDER BY starts_at,name')],'operators':[dict(r) for r in c.execute('SELECT * FROM operators WHERE active=1 ORDER BY name')],'devices':[dict(r) for r in c.execute('SELECT * FROM devices ORDER BY name')],'help_requests':[dict(r) for r in c.execute("SELECT * FROM help_requests WHERE status NOT IN ('resolved','cancelled') ORDER BY id DESC")]}
 
 @app.post('/api/events')
 def event_create(x:EventIn,authorization:str|None=Header(default=None)):
@@ -148,49 +361,178 @@ def event_update(eid:int,x:EventIn,authorization:str|None=Header(default=None)):
     a=require_auth(authorization);require_manager(a)
     with db() as c:c.execute('UPDATE events SET name=?,client=?,event_color=?,starts_at=?,ends_at=?,event_status=? WHERE id=?',(x.name.strip(),x.client.strip(),x.event_color,x.starts_at,x.ends_at,x.event_status,eid))
     return {'ok':True}
+def fmt_report_dt(iso):
+    if not iso:return '—'
+    try:
+        s=iso[:19] if len(iso)>19 else iso
+        dt=datetime.fromisoformat(s)
+        return dt.strftime('%d %b %Y, %H:%M')
+    except Exception:
+        return iso[:16] if len(iso)>16 else iso
+
+STATUS_COLORS={'new':'#c0392b','acknowledged':'#b26a00','resolved':'#1c7c3c','cancelled':'#777777'}
+
+def render_event_report_pdf(r):
+    styles=getSampleStyleSheet()
+    accent_dark=colors.HexColor('#0c6e9c');ink=colors.HexColor('#1b2430');muted=colors.HexColor('#6b7480')
+    eyebrow=ParagraphStyle('RCEyebrow',parent=styles['Normal'],textColor=accent_dark,fontSize=9,leading=11,spaceAfter=2)
+    title_style=ParagraphStyle('RCTitle',parent=styles['Title'],textColor=ink,fontSize=22,leading=26,spaceAfter=2,alignment=0)
+    meta_style=ParagraphStyle('RCMeta',parent=styles['Normal'],textColor=muted,fontSize=9.5,leading=13)
+    h2=ParagraphStyle('RCH2',parent=styles['Heading2'],fontSize=13,spaceBefore=16,spaceAfter=6,textColor=accent_dark)
+    body=ParagraphStyle('RCBody',parent=styles['BodyText'],fontSize=9.5,textColor=ink)
+    cell=ParagraphStyle('RCCell',parent=styles['BodyText'],fontSize=8.5,leading=11,textColor=ink)
+    head_cell=ParagraphStyle('RCHeadCell',parent=cell,textColor=colors.white,fontName='Helvetica-Bold')
+
+    def P(txt,style=cell):return Paragraph(pdf_esc(str(txt)) if txt not in (None,'') else '—',style)
+    def status_para(s):
+        c=STATUS_COLORS.get((s or '').lower(),'#6b7480')
+        return Paragraph(f'<font color="{c}"><b>{pdf_esc((s or "unknown").upper())}</b></font>',cell)
+    def zebra(n,header_bg):
+        cmds=[('BACKGROUND',(0,0),(-1,0),header_bg),
+              ('GRID',(0,0),(-1,-1),0.5,colors.HexColor('#e2e6ea')),('VALIGN',(0,0),(-1,-1),'MIDDLE'),
+              ('TOPPADDING',(0,0),(-1,-1),6),('BOTTOMPADDING',(0,0),(-1,-1),6),
+              ('LEFTPADDING',(0,0),(-1,-1),8),('RIGHTPADDING',(0,0),(-1,-1),8)]
+        for i in range(1,n):
+            if i%2==0:cmds.append(('BACKGROUND',(0,i),(-1,i),colors.HexColor('#f7fafc')))
+        return TableStyle(cmds)
+
+    CONTENT_W=178*mm
+    e=r['event']
+    sched_bits=[b for b in [e.get('starts_at'),e.get('ends_at')] if b]
+    sched=f"{fmt_report_dt(e.get('starts_at'))} → {fmt_report_dt(e.get('ends_at'))}" if sched_bits else 'No schedule set'
+    generated=datetime.now(timezone.utc).strftime('%d %b %Y, %H:%M UTC')
+
+    def footer(canvas,doc):
+        canvas.saveState()
+        canvas.setStrokeColor(colors.HexColor('#e2e6ea'));canvas.setLineWidth(0.6)
+        canvas.line(16*mm,14*mm,A4[0]-16*mm,14*mm)
+        canvas.setFont('Helvetica',7.5);canvas.setFillColor(muted)
+        canvas.drawString(16*mm,9*mm,f"{r.get('venue_name') or 'AT RoomComms'} · Generated {generated}")
+        canvas.drawRightString(A4[0]-16*mm,9*mm,f"Page {doc.page}")
+        canvas.restoreState()
+
+    buf=BytesIO()
+    doc=SimpleDocTemplate(buf,pagesize=A4,topMargin=18*mm,bottomMargin=20*mm,leftMargin=16*mm,rightMargin=16*mm,
+        title=f"{e['name']} - Event Report",author='AT RoomComms')
+
+    story=[Paragraph('AT ROOMCOMMS &nbsp;·&nbsp; EVENT REPORT',eyebrow),
+        Paragraph(pdf_esc(e['name'] or 'Event'),title_style),
+        Paragraph(f"{pdf_esc(e.get('client') or 'No client')} &nbsp;·&nbsp; {pdf_esc((e.get('event_status') or '').replace('_',' ').title())} &nbsp;·&nbsp; {pdf_esc(sched)}",meta_style),
+        Spacer(1,7*mm)]
+
+    total_msgs=sum(x['message_count'] for x in r['rooms'])
+    stat_labels=['ROOMS','MESSAGES','HELP REQUESTS','EMERGENCY ALERTS']
+    stat_values=[len(r['rooms']),total_msgs,len(r['help_requests']),len(r['emergencies'])]
+    stat_style=ParagraphStyle('RCStatNum',parent=styles['Normal'],fontSize=18,leading=22,textColor=colors.white,alignment=1,fontName='Helvetica-Bold')
+    stat_lbl_style=ParagraphStyle('RCStatLbl',parent=styles['Normal'],fontSize=7.5,leading=10,textColor=colors.HexColor('#cfe9f7'),alignment=1)
+    summary=Table([[Paragraph(str(v),stat_style) for v in stat_values],[Paragraph(l,stat_lbl_style) for l in stat_labels]],
+        colWidths=[CONTENT_W/4]*4,rowHeights=[9*mm,6*mm])
+    summary.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,-1),accent_dark),('VALIGN',(0,0),(-1,-1),'MIDDLE'),
+        ('TOPPADDING',(0,0),(-1,0),6),('BOTTOMPADDING',(0,1),(-1,1),8),
+        ('LINEAFTER',(0,0),(-2,-1),0.6,colors.HexColor('#1487ad'))]))
+    story.append(summary)
+
+    story.append(Paragraph('Rooms',h2))
+    room_rows=[[P('Room',head_cell),P('Operator',head_cell),P('Msgs',head_cell),P('First activity',head_cell),P('Last activity',head_cell)]]
+    for x in r['rooms']:
+        room_rows.append([P(x['name']),P(x.get('operator_name') or 'Unassigned'),Paragraph(str(x['message_count']),cell),
+            P(fmt_report_dt(x.get('first_activity'))),P(fmt_report_dt(x.get('last_activity')))])
+    rt=Table(room_rows,colWidths=[34*mm,32*mm,16*mm,48*mm,48*mm],repeatRows=1)
+    rt.setStyle(zebra(len(room_rows),accent_dark))
+    story.append(rt)
+
+    story.append(Paragraph('Help Requests',h2))
+    if r['help_requests']:
+        hr_rows=[[P('Room',head_cell),P('Category',head_cell),P('Description',head_cell),P('Status',head_cell)]]
+        for h in r['help_requests']:
+            hr_rows.append([P(h.get('room_name') or 'Room'),P(h.get('category')),P(h.get('description')),status_para(h.get('status'))])
+        ht=Table(hr_rows,colWidths=[26*mm,28*mm,90*mm,34*mm],repeatRows=1)
+        ht.setStyle(zebra(len(hr_rows),accent_dark))
+        story.append(ht)
+    else:
+        story.append(Paragraph('No help requests were raised.',body))
+
+    story.append(Paragraph('Emergency Alerts',h2))
+    if r['emergencies']:
+        em_rows=[[P('Sender',head_cell),P('Message',head_cell),P('Time',head_cell)]]
+        for m in r['emergencies']:
+            em_rows.append([P(m.get('sender')),P(m.get('body')),P(fmt_report_dt(m.get('created_at')))])
+        et=Table(em_rows,colWidths=[30*mm,100*mm,48*mm],repeatRows=1)
+        et.setStyle(zebra(len(em_rows),colors.HexColor('#a83232')))
+        story.append(et)
+    else:
+        story.append(Paragraph('No emergency alerts were raised.',body))
+
+    doc.build(story,onFirstPage=footer,onLaterPages=footer)
+    return buf.getvalue()
+
+def _event_report_data(eid):
+    with db() as c:
+        event=c.execute('SELECT * FROM events WHERE id=?',(eid,)).fetchone()
+        if not event:raise HTTPException(404,'Event not found')
+        rooms=[dict(r) for r in c.execute('SELECT * FROM rooms WHERE event_id=? ORDER BY name',(eid,))]
+        room_ids=[r['id'] for r in rooms]
+        help_requests=[dict(r) for r in c.execute('SELECT * FROM help_requests WHERE event_id=? ORDER BY id',(eid,))]
+        emergencies=[]
+        msg_counts={};activity={}
+        if room_ids:
+            ph=','.join('?'*len(room_ids))
+            for r in c.execute(f"SELECT scope_id,COUNT(*) cnt,MIN(created_at) first_at,MAX(created_at) last_at FROM messages WHERE scope='room' AND scope_id IN ({ph}) AND deleted_at IS NULL GROUP BY scope_id",room_ids):
+                msg_counts[r['scope_id']]=r['cnt'];activity[r['scope_id']]={'first':r['first_at'],'last':r['last_at']}
+            emergencies=[dict(r) for r in c.execute(f"SELECT * FROM messages WHERE scope='room' AND scope_id IN ({ph}) AND priority='emergency' AND deleted_at IS NULL ORDER BY id",room_ids)]
+            for r in emergencies: r['body']=decrypt_text(r['body'])
+        for r in rooms:
+            r['message_count']=msg_counts.get(r['id'],0)
+            r['first_activity']=activity.get(r['id'],{}).get('first')
+            r['last_activity']=activity.get(r['id'],{}).get('last')
+        venue_name=setting(c,'venue_name')
+    return {'event':dict(event),'rooms':rooms,'help_requests':help_requests,'emergencies':emergencies,'venue_name':venue_name}
+
+@app.get('/api/events/{eid}/report')
+def event_report(eid:int,authorization:str|None=Header(default=None)):
+    a=require_auth(authorization);require_manager(a)
+    return _event_report_data(eid)
+
+@app.get('/api/events/{eid}/report.pdf')
+def event_report_pdf(eid:int,authorization:str|None=Header(default=None)):
+    a=require_auth(authorization);require_manager(a)
+    r=_event_report_data(eid)
+    pdf=render_event_report_pdf(r)
+    fname=''.join(ch for ch in (r['event']['name'] or 'event') if ch.isalnum() or ch in '_- ').strip().replace(' ','_') or 'event'
+    return Response(content=pdf,media_type='application/pdf',headers={'Content-Disposition':f'attachment; filename="{fname}_report.pdf"'})
+
 @app.delete('/api/events/{eid}')
 def event_delete(eid:int,authorization:str|None=Header(default=None)):
     a=require_auth(authorization);require_manager(a)
-    with db() as c:c.execute('DELETE FROM event_rooms WHERE event_id=?',(eid,));c.execute('DELETE FROM events WHERE id=?',(eid,))
+    with db() as c:
+        c.execute('UPDATE rooms SET enabled=0 WHERE event_id=?',(eid,))
+        c.execute('DELETE FROM event_rooms WHERE event_id=?',(eid,))
+        c.execute('DELETE FROM events WHERE id=?',(eid,))
     return {'ok':True}
 
 @app.post('/api/rooms')
 def room_create(x:RoomIn,authorization:str|None=Header(default=None)):
     a=require_auth(authorization);require_manager(a)
+    if not x.event_id:raise HTTPException(400,'A room must belong to an event')
     with db() as c:
-        try:rid=c.execute('INSERT INTO rooms(name,short_name,current_status) VALUES(?,?,?)',(x.name.strip(),x.short_name.strip(),x.current_status)).lastrowid
+        if not c.execute('SELECT 1 FROM events WHERE id=? AND archived=0',(x.event_id,)).fetchone():raise HTTPException(404,'Event not found')
+        try:rid=c.execute('INSERT INTO rooms(name,short_name,current_status,event_id,operator_name) VALUES(?,?,?,?,?)',(x.name.strip(),x.short_name.strip(),x.current_status,x.event_id,x.operator_name.strip())).lastrowid
         except sqlite3.IntegrityError:raise HTTPException(409,'Room already exists')
     return {'id':rid}
 @app.patch('/api/rooms/{rid}')
 def room_update(rid:int,x:RoomIn,authorization:str|None=Header(default=None)):
     a=require_auth(authorization);require_manager(a)
-    with db() as c:c.execute('UPDATE rooms SET name=?,short_name=?,current_status=? WHERE id=?',(x.name.strip(),x.short_name.strip(),x.current_status,rid))
+    with db() as c:c.execute('UPDATE rooms SET name=?,short_name=?,current_status=?,operator_name=? WHERE id=?',(x.name.strip(),x.short_name.strip(),x.current_status,x.operator_name.strip(),rid))
     return {'ok':True}
 @app.delete('/api/rooms/{rid}')
 def room_delete(rid:int,authorization:str|None=Header(default=None)):
     a=require_auth(authorization);require_manager(a)
-    with db() as c:c.execute('DELETE FROM event_rooms WHERE room_id=?',(rid,));c.execute('UPDATE rooms SET enabled=0 WHERE id=?',(rid,))
+    with db() as c:c.execute('UPDATE rooms SET enabled=0 WHERE id=?',(rid,))
     return {'ok':True}
 @app.patch('/api/rooms/{rid}/status')
 def room_status(rid:int,p:dict,authorization:str|None=Header(default=None)):
     a=require_auth(authorization);require_manager(a)
     with db() as c:c.execute('UPDATE rooms SET current_status=? WHERE id=?',(p.get('status','closed'),rid))
-    return {'ok':True}
-
-@app.post('/api/events/{eid}/rooms/{rid}')
-def event_room_add(eid:int,rid:int,p:dict,authorization:str|None=Header(default=None)):
-    a=require_auth(authorization);require_manager(a)
-    with db() as c:c.execute('INSERT INTO event_rooms(event_id,room_id,operator_name) VALUES(?,?,?) ON CONFLICT(event_id,room_id) DO UPDATE SET operator_name=excluded.operator_name',(eid,rid,(p.get('operator_name') or '').strip()))
-    return {'ok':True}
-@app.patch('/api/events/{eid}/rooms/{rid}')
-def event_room_update(eid:int,rid:int,p:dict,authorization:str|None=Header(default=None)):
-    a=require_auth(authorization);require_manager(a)
-    with db() as c:c.execute('UPDATE event_rooms SET operator_name=? WHERE event_id=? AND room_id=?',((p.get('operator_name') or '').strip(),eid,rid))
-    return {'ok':True}
-@app.delete('/api/events/{eid}/rooms/{rid}')
-def event_room_delete(eid:int,rid:int,authorization:str|None=Header(default=None)):
-    a=require_auth(authorization);require_manager(a)
-    with db() as c:c.execute('DELETE FROM event_rooms WHERE event_id=? AND room_id=?',(eid,rid))
     return {'ok':True}
 
 @app.post('/api/operators')
@@ -205,7 +547,7 @@ def operator_create(x:OperatorIn,authorization:str|None=Header(default=None)):
 @app.delete('/api/operators/{oid}')
 def operator_delete(oid:int,authorization:str|None=Header(default=None)):
     a=require_auth(authorization);require_manager(a)
-    with db() as c:c.execute('UPDATE operators SET active=0 WHERE id=?',(oid,))
+    with db() as c:c.execute('UPDATE operators SET active=0 WHERE id=?',(oid,));c.execute('DELETE FROM operator_sessions WHERE operator_id=?',(oid,))
     return {'ok':True}
 
 @app.get('/api/accounts')
@@ -236,74 +578,326 @@ def account_disable(aid:int,authorization:str|None=Header(default=None)):
 
 @app.patch('/api/settings')
 def settings_update(p:dict,authorization:str|None=Header(default=None)):
-    a=require_auth(authorization);require_admin(a);allowed={'venue_name','control_centre_name','attachment_limit_mb'}
+    a=require_auth(authorization);require_admin(a)
+    allowed={'venue_name','control_centre_name','daily_logoff_utc','ui_theme','ui_accent','attachment_limit_mb','feed_limit','status_labels','priority_labels','help_categories'}
+    if 'ui_theme' in p and p['ui_theme'] not in ('blue','purple','green','orange'):raise HTTPException(400,'Invalid theme')
+    if p.get('ui_accent') and not re.fullmatch(r'#[0-9a-fA-F]{6}',p['ui_accent']):raise HTTPException(400,'Invalid accent colour')
     with db() as c:
         for k,v in p.items():
             if k in allowed:c.execute('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',(k,str(v)))
     return {'ok':True}
 
+def reads_for(c,mid):
+    return [dict(x) for x in c.execute('SELECT actor_kind,actor_id,display_name,read_at FROM message_reads WHERE message_id=? ORDER BY read_at',(mid,))]
+def mark_read(c,actor,mid):
+    if c.execute('SELECT 1 FROM message_reads WHERE message_id=? AND actor_kind=? AND actor_id=?',(mid,actor['kind'],actor['id'])).fetchone():return None
+    ts=now()
+    c.execute('INSERT INTO message_reads(message_id,actor_kind,actor_id,display_name,read_at) VALUES(?,?,?,?,?)',(mid,actor['kind'],actor['id'],actor['display_name'],ts))
+    return ts
+def message_dict(c,mid):
+    r=c.execute('SELECT * FROM messages WHERE id=?',(mid,)).fetchone()
+    if not r:return None
+    d=dict(r);d['body']=decrypt_text(d['body']);d['attachments']=[dict(x) for x in c.execute('SELECT * FROM attachments WHERE message_id=?',(mid,))];d['reads']=reads_for(c,mid)
+    return d
+
 @app.get('/api/messages')
-def messages(scope:str,scope_id:int|None=None,authorization:str|None=Header(default=None)):
-    require_auth(authorization)
+async def messages(scope:str,scope_id:int|None=None,authorization:str|None=Header(default=None)):
+    a=require_actor(authorization)
     with db() as c:
-        rows=c.execute("SELECT * FROM messages WHERE scope='venue' ORDER BY id DESC LIMIT 250") if scope=='venue' else c.execute('SELECT * FROM messages WHERE scope=? AND scope_id=? ORDER BY id DESC LIMIT 250',(scope,scope_id));out=[]
-        for r in reversed(rows.fetchall()):
-            d=dict(r);d['attachments']=[dict(x) for x in c.execute('SELECT * FROM attachments WHERE message_id=?',(r['id'],))];out.append(d)
-        return out
+        if not actor_can_access(a,c,scope,scope_id):raise HTTPException(403,'No access to this feed')
+        try:lim=max(20,min(2000,int(setting(c,'feed_limit','250'))))
+        except Exception:lim=250
+        rows=list(reversed((c.execute("SELECT * FROM messages WHERE scope='venue' AND deleted_at IS NULL ORDER BY id DESC LIMIT ?",(lim,)) if scope=='venue' else c.execute('SELECT * FROM messages WHERE scope=? AND scope_id=? AND deleted_at IS NULL ORDER BY id DESC LIMIT ?',(scope,scope_id,lim))).fetchall()))
+        newly_read=[r['id'] for r in rows if not (r['sender_kind']==a['kind'] and r['sender_id']==a['id']) and mark_read(c,a,r['id'])]
+        out=[]
+        for r in rows:
+            d=dict(r);d['body']=decrypt_text(d['body']);d['attachments']=[dict(x) for x in c.execute('SELECT * FROM attachments WHERE message_id=?',(r['id'],))];d['reads']=reads_for(c,r['id']);out.append(d)
+        thread_owner,help_room_id,help_event_id,help_scope=broadcast_extras(c,scope,scope_id)
+    if newly_read:
+        by_id={d['id']:d for d in out}
+        visible=visible_predicate(scope,scope_id,thread_owner=thread_owner,help_room_id=help_room_id,help_event_id=help_event_id,help_scope=help_scope)
+        for mid in newly_read:
+            await manager.broadcast({'type':'message_updated','message':by_id[mid]},visible=visible)
+    return out
 @app.post('/api/messages')
-def message_create(x:MessageIn,authorization:str|None=Header(default=None)):
-    a=require_auth(authorization);sender=x.sender.strip() or a['display_name']
-    with db() as c:mid=c.execute('INSERT INTO messages(scope,scope_id,sender,body,priority,created_at) VALUES(?,?,?,?,?,?)',(x.scope,x.scope_id,sender,x.body,x.priority,now())).lastrowid
-    return {'id':mid}
+async def message_create(x:MessageIn,authorization:str|None=Header(default=None)):
+    a=require_actor(authorization)
+    if x.scope not in ('venue','event','room','emergency_thread','help_thread'):raise HTTPException(400,'Invalid scope')
+    body=x.body.strip()
+    if not body:raise HTTPException(400,'Message cannot be empty')
+    with db() as c:
+        if not actor_can_access(a,c,x.scope,x.scope_id):raise HTTPException(403,'No access to this feed')
+        thread_owner=None;help_room_id=None;help_event_id=None;help_scope='room'
+        if x.scope=='emergency_thread':
+            orig=c.execute('SELECT sender_kind,sender_id FROM messages WHERE id=?',(x.scope_id,)).fetchone()
+            if not orig:raise HTTPException(404,'Original message not found')
+            thread_owner=(orig['sender_kind'],orig['sender_id'])
+        if x.scope=='help_thread':
+            hr=c.execute('SELECT room_id,event_id,scope FROM help_requests WHERE id=?',(x.scope_id,)).fetchone()
+            if not hr:raise HTTPException(404,'Help request not found')
+            help_room_id=hr['room_id'];help_event_id=hr['event_id'];help_scope=hr['scope'] or 'room'
+        mid=c.execute('INSERT INTO messages(scope,scope_id,sender,sender_id,sender_kind,body,priority,created_at) VALUES(?,?,?,?,?,?,?,?)',(x.scope,x.scope_id,a['display_name'],a['id'],a['kind'],encrypt_text(body),x.priority,now())).lastrowid
+        d=message_dict(c,mid)
+        emg_room_name=emg_event_name=None
+        if x.scope=='room' and x.priority=='emergency':
+            room=c.execute('SELECT name,event_id FROM rooms WHERE id=?',(x.scope_id,)).fetchone()
+            if room:
+                emg_room_name=room['name']
+                ev=c.execute('SELECT name FROM events WHERE id=?',(room['event_id'],)).fetchone()
+                emg_event_name=ev['name'] if ev else ''
+    await manager.broadcast({'type':'message_new','message':d},visible=visible_predicate(x.scope,x.scope_id,thread_owner=thread_owner,help_room_id=help_room_id,help_event_id=help_event_id,help_scope=help_scope,priority=x.priority))
+    if emg_room_name is not None:
+        await manager.broadcast({'type':'emergency_alert','room_id':x.scope_id,'room_name':emg_room_name,'event_name':emg_event_name,'body':body,'sender':a['display_name'],'sender_kind':a['kind'],'sender_id':a['id'],'message_id':mid})
+    return d
+@app.patch('/api/messages/{mid}')
+async def message_edit(mid:int,x:MessageEdit,authorization:str|None=Header(default=None)):
+    a=require_actor(authorization)
+    with db() as c:
+        m=c.execute('SELECT * FROM messages WHERE id=? AND deleted_at IS NULL',(mid,)).fetchone()
+        if not m:raise HTTPException(404,'Message not found')
+        is_owner=m['sender_kind']==a['kind'] and m['sender_id']==a['id']
+        is_admin_override=a['kind']=='account' and a['role']=='admin'
+        if not (is_owner or is_admin_override):raise HTTPException(403,'You can only edit your own messages')
+        body=x.body.strip()
+        if not body:raise HTTPException(400,'Message cannot be empty')
+        c.execute('UPDATE messages SET body=?,edited_at=? WHERE id=?',(encrypt_text(body),now(),mid))
+        d=message_dict(c,mid)
+        thread_owner,help_room_id,help_event_id,help_scope=broadcast_extras(c,m['scope'],m['scope_id'])
+    await manager.broadcast({'type':'message_updated','message':d},visible=visible_predicate(m['scope'],m['scope_id'],thread_owner=thread_owner,help_room_id=help_room_id,help_event_id=help_event_id,help_scope=help_scope,priority=m['priority']))
+    return d
+@app.delete('/api/messages/{mid}')
+async def message_delete(mid:int,authorization:str|None=Header(default=None)):
+    a=require_actor(authorization)
+    with db() as c:
+        m=c.execute('SELECT * FROM messages WHERE id=? AND deleted_at IS NULL',(mid,)).fetchone()
+        if not m:raise HTTPException(404,'Message not found')
+        is_owner=m['sender_kind']==a['kind'] and m['sender_id']==a['id']
+        is_admin_override=a['kind']=='account' and a['role']=='admin'
+        if not (is_owner or is_admin_override):raise HTTPException(403,'You can only delete your own messages')
+        c.execute('UPDATE messages SET deleted_at=? WHERE id=?',(now(),mid))
+        scope,scope_id=m['scope'],m['scope_id']
+        thread_owner,help_room_id,help_event_id,help_scope=broadcast_extras(c,scope,scope_id)
+    await manager.broadcast({'type':'message_deleted','id':mid,'scope':scope,'scope_id':scope_id},visible=visible_predicate(scope,scope_id,thread_owner=thread_owner,help_room_id=help_room_id,help_event_id=help_event_id,help_scope=help_scope,priority=m['priority']))
+    return {'ok':True}
 @app.post('/api/messages/{mid}/attachments')
 async def attachment_add(mid:int,file:UploadFile=File(...),authorization:str|None=Header(default=None)):
-    require_auth(authorization)
-    with db() as c:lim=int(setting(c,'attachment_limit_mb','25'))
+    a=require_actor(authorization)
+    with db() as c:
+        m=c.execute('SELECT * FROM messages WHERE id=? AND deleted_at IS NULL',(mid,)).fetchone()
+        if not m:raise HTTPException(404,'Message not found')
+        if not message_access_ok(a,c,m):raise HTTPException(403,'No access to this feed')
+    with db() as c:
+        try:lim_mb=int(setting(c,'attachment_limit_mb','25'))
+        except Exception:lim_mb=25
     safe=''.join(ch for ch in (file.filename or 'file') if ch.isalnum() or ch in '._- ')[:180] or 'file';stored=uuid.uuid4().hex+'_'+safe;dest=UP/stored;size=0
     with dest.open('wb') as f:
         while chunk:=await file.read(1024*1024):
             size+=len(chunk)
-            if size>lim*1024*1024:f.close();dest.unlink(missing_ok=True);raise HTTPException(413,f'{lim}MB limit')
+            if size>lim_mb*1024*1024:
+                f.close();dest.unlink(missing_ok=True)
+                raise HTTPException(413,f'Attachment exceeds the {lim_mb}MB limit')
             f.write(chunk)
-    with db() as c:c.execute('INSERT INTO attachments(message_id,original_name,stored_name,mime_type,size) VALUES(?,?,?,?,?)',(mid,file.filename or safe,stored,file.content_type or '',size))
-    return {'ok':True}
+    with db() as c:
+        c.execute('INSERT INTO attachments(message_id,original_name,stored_name,mime_type,size) VALUES(?,?,?,?,?)',(mid,file.filename or safe,stored,file.content_type or '',size))
+        d=message_dict(c,mid)
+        thread_owner,help_room_id,help_event_id,help_scope=broadcast_extras(c,m['scope'],m['scope_id'])
+    if d:
+        if m['scope']=='dm':
+            pair={(m['sender_kind'],m['sender_id']),(m['to_kind'],m['to_id'])}
+            await manager.broadcast({'type':'message_updated','message':d},visible=lambda actor:(actor['kind'],actor['id']) in pair)
+        else:
+            await manager.broadcast({'type':'message_updated','message':d},visible=visible_predicate(m['scope'],m['scope_id'],thread_owner=thread_owner,help_room_id=help_room_id,help_event_id=help_event_id,help_scope=help_scope,priority=m['priority']))
+    return d or {'ok':True}
 @app.get('/api/attachments/{aid}')
 def attachment_get(aid:int,authorization:str|None=Header(default=None)):
-    require_auth(authorization)
-    with db() as c:r=c.execute('SELECT * FROM attachments WHERE id=?',(aid,)).fetchone()
-    if not r:raise HTTPException(404)
+    a=require_actor(authorization)
+    with db() as c:
+        r=c.execute('SELECT * FROM attachments WHERE id=?',(aid,)).fetchone()
+        if not r:raise HTTPException(404)
+        m=c.execute('SELECT * FROM messages WHERE id=?',(r['message_id'],)).fetchone()
+        if not m or not message_access_ok(a,c,m):raise HTTPException(403)
     return FileResponse(UP/r['stored_name'],media_type=r['mime_type'] or 'application/octet-stream',filename=r['original_name'])
 
-@app.post('/api/help')
-def help_create(x:HelpIn,authorization:str|None=Header(default=None)):
-    a=require_auth(authorization)
+@app.post('/api/messages/read')
+async def mark_messages_read(x:ReadIn,authorization:str|None=Header(default=None)):
+    a=require_actor(authorization)
+    to_broadcast=[]
     with db() as c:
-        rr=c.execute('SELECT name FROM rooms WHERE id=?',(x.room_id,)).fetchone() if x.room_id else None
-        hid=c.execute("INSERT INTO help_requests(event_id,room_id,room_name,requested_by,category,description,priority,status,created_at) VALUES(?,?,?,?,?,?,?,'new',?)",(x.event_id,x.room_id,rr['name'] if rr else '',x.requested_by or a['display_name'],x.category,x.description,x.priority,now())).lastrowid
+        for mid in x.ids:
+            m=c.execute('SELECT id,scope,scope_id,sender_kind,sender_id,priority,to_kind,to_id FROM messages WHERE id=? AND deleted_at IS NULL',(mid,)).fetchone()
+            if not m or (m['sender_kind']==a['kind'] and m['sender_id']==a['id']):continue
+            if not message_access_ok(a,c,m):continue
+            if mark_read(c,a,mid):
+                extras=broadcast_extras(c,m['scope'],m['scope_id']) if m['scope'] in ('emergency_thread','help_thread') else (None,None,None,'room')
+                to_broadcast.append((message_dict(c,mid),dict(m),extras))
+    for d,m,(thread_owner,help_room_id,help_event_id,help_scope) in to_broadcast:
+        if m['scope']=='dm':
+            pair={(m['sender_kind'],m['sender_id']),(m['to_kind'],m['to_id'])}
+            await manager.broadcast({'type':'message_updated','message':d},visible=lambda actor,pair=pair:(actor['kind'],actor['id']) in pair)
+        else:
+            await manager.broadcast({'type':'message_updated','message':d},visible=visible_predicate(m['scope'],m['scope_id'],thread_owner=thread_owner,help_room_id=help_room_id,help_event_id=help_event_id,help_scope=help_scope,priority=m['priority']))
+    return {'ok':True}
+
+@app.get('/api/dm/contacts')
+def dm_contacts(authorization:str|None=Header(default=None)):
+    a=require_actor(authorization)
+    with db() as c:
+        accts=c.execute('SELECT id,display_name FROM accounts WHERE active=1').fetchall()
+        out=[{'kind':'account','id':r['id'],'display_name':r['display_name']} for r in accts if not (a['kind']=='account' and r['id']==a['id'])]
+        ops=c.execute('SELECT id,name FROM operators WHERE active=1').fetchall()
+        out+=[{'kind':'operator','id':r['id'],'display_name':r['name']} for r in ops if not (a['kind']=='operator' and r['id']==a['id'])]
+    return out
+@app.get('/api/dm')
+async def dm_thread(with_kind:str,with_id:int,authorization:str|None=Header(default=None)):
+    a=require_actor(authorization)
+    with db() as c:
+        try:lim=max(20,min(2000,int(setting(c,'feed_limit','250'))))
+        except Exception:lim=250
+        rows=list(reversed(c.execute("SELECT * FROM messages WHERE scope='dm' AND deleted_at IS NULL AND ((sender_kind=? AND sender_id=? AND to_kind=? AND to_id=?) OR (sender_kind=? AND sender_id=? AND to_kind=? AND to_id=?)) ORDER BY id DESC LIMIT ?",(a['kind'],a['id'],with_kind,with_id,with_kind,with_id,a['kind'],a['id'],lim)).fetchall()))
+        newly_read=[r['id'] for r in rows if not (r['sender_kind']==a['kind'] and r['sender_id']==a['id']) and mark_read(c,a,r['id'])]
+        out=[]
+        for r in rows:
+            d=dict(r);d['body']=decrypt_text(d['body']);d['attachments']=[dict(x) for x in c.execute('SELECT * FROM attachments WHERE message_id=?',(r['id'],))];d['reads']=reads_for(c,r['id']);out.append(d)
+    if newly_read:
+        by_id={d['id']:d for d in out}
+        pair={(a['kind'],a['id']),(with_kind,with_id)}
+        for mid in newly_read:
+            await manager.broadcast({'type':'message_updated','message':by_id[mid]},visible=lambda actor,pair=pair:(actor['kind'],actor['id']) in pair)
+    return out
+@app.post('/api/dm')
+async def dm_send(x:DMIn,authorization:str|None=Header(default=None)):
+    a=require_actor(authorization)
+    if x.to_kind not in ('account','operator'):raise HTTPException(400,'Invalid recipient')
+    if a['kind']==x.to_kind and a['id']==x.to_id:raise HTTPException(400,"Can't message yourself")
+    body=x.body.strip()
+    if not body:raise HTTPException(400,'Message cannot be empty')
+    with db() as c:
+        if x.to_kind=='account':t=c.execute('SELECT id FROM accounts WHERE id=? AND active=1',(x.to_id,)).fetchone()
+        else:t=c.execute('SELECT id FROM operators WHERE id=? AND active=1',(x.to_id,)).fetchone()
+        if not t:raise HTTPException(404,'Recipient not found')
+        mid=c.execute('INSERT INTO messages(scope,scope_id,sender,sender_id,sender_kind,body,priority,created_at,to_kind,to_id) VALUES(?,?,?,?,?,?,?,?,?,?)',('dm',None,a['display_name'],a['id'],a['kind'],encrypt_text(body),'normal',now(),x.to_kind,x.to_id)).lastrowid
+        d=message_dict(c,mid)
+    pair={(a['kind'],a['id']),(x.to_kind,x.to_id)}
+    await manager.broadcast({'type':'dm_new','message':d},visible=lambda actor:(actor['kind'],actor['id']) in pair)
+    return d
+
+def help_visible(room_id,event_id,scope):
+    if scope=='venue':return None
+    if scope=='event':return lambda actor:actor['kind']=='account' or actor['event_id']==event_id
+    return lambda actor:actor['kind']=='account' or actor['room_id']==room_id
+@app.post('/api/help')
+async def help_create(x:HelpIn,authorization:str|None=Header(default=None)):
+    a=require_actor(authorization)
+    event_id,room_id=x.event_id,x.room_id
+    if a['kind']=='operator':event_id,room_id=a['event_id'],a['room_id']
+    if not room_id:raise HTTPException(400,'A room is required for a help request')
+    scope=x.scope if x.scope in ('room','event','venue') else 'room'
+    with db() as c:
+        rr=c.execute('SELECT name FROM rooms WHERE id=?',(room_id,)).fetchone()
+        room_name=rr['name'] if rr else ''
+        hid=c.execute("INSERT INTO help_requests(event_id,room_id,room_name,requested_by,category,description,priority,status,created_at,broadcast,scope) VALUES(?,?,?,?,?,?,?,'new',?,?,?)",(event_id,room_id,room_name,x.requested_by.strip() or a['display_name'],x.category,x.description,x.priority,now(),1 if scope=='venue' else 0,scope)).lastrowid
+        hr=dict(c.execute('SELECT * FROM help_requests WHERE id=?',(hid,)).fetchone())
+        tag={'room':'🆘 Help requested — ','event':'📣 Event-wide help — ','venue':'📢 All-call — '}[scope]
+        feed_body=tag+f"{x.category}: {x.description}"+(f' ({room_name})' if scope!='room' else '')
+        mid=c.execute('INSERT INTO messages(scope,scope_id,sender,sender_id,sender_kind,body,priority,created_at,help_request_id) VALUES(?,?,?,?,?,?,?,?,?)',('room',room_id,a['display_name'],a['id'],a['kind'],encrypt_text(feed_body),'urgent',now(),hid)).lastrowid
+        msg=message_dict(c,mid)
+    await manager.broadcast({'type':'help_new','request':hr},visible=help_visible(room_id,event_id,scope))
+    await manager.broadcast({'type':'message_new','message':msg},visible=help_visible(room_id,event_id,scope))
     return {'id':hid}
+@app.get('/api/help')
+def help_list(authorization:str|None=Header(default=None)):
+    require_auth(authorization)
+    with db() as c:return [dict(r) for r in c.execute('SELECT * FROM help_requests ORDER BY id DESC LIMIT 250')]
 @app.patch('/api/help/{hid}')
-def help_update(hid:int,p:dict,authorization:str|None=Header(default=None)):
+async def help_update(hid:int,p:dict,authorization:str|None=Header(default=None)):
     a=require_auth(authorization);require_manager(a);st=p.get('status')
     with db() as c:
         if st=='acknowledged':c.execute('UPDATE help_requests SET status=?,acknowledged_at=? WHERE id=?',(st,now(),hid))
         elif st=='resolved':c.execute('UPDATE help_requests SET status=?,resolved_at=? WHERE id=?',(st,now(),hid))
         elif st:c.execute('UPDATE help_requests SET status=? WHERE id=?',(st,hid))
         if 'assigned_to' in p:c.execute('UPDATE help_requests SET assigned_to=? WHERE id=?',(p.get('assigned_to',''),hid))
+        hr=dict(c.execute('SELECT * FROM help_requests WHERE id=?',(hid,)).fetchone())
+    await manager.broadcast({'type':'help_updated','request':hr},visible=help_visible(hr['room_id'],hr['event_id'],hr['scope'] or 'room'))
+    return {'ok':True}
+
+@app.post('/api/issues')
+async def issue_create(x:IssueIn,authorization:str|None=Header(default=None)):
+    a=require_actor(authorization)
+    desc=x.description.strip()
+    if not desc:raise HTTPException(400,'Description is required')
+    with db() as c:
+        iid=c.execute("INSERT INTO issues(reporter_name,reporter_kind,category,description,status,created_at) VALUES(?,?,?,?,'open',?)",(a['display_name'],a['kind'],x.category,desc,now())).lastrowid
+        iss=dict(c.execute('SELECT * FROM issues WHERE id=?',(iid,)).fetchone())
+    await manager.broadcast({'type':'issue_new','issue':iss},visible=lambda actor:actor['kind']=='account')
+    return {'id':iid}
+@app.get('/api/issues')
+def issue_list(authorization:str|None=Header(default=None)):
+    require_actor(authorization)
+    with db() as c:return [dict(r) for r in c.execute('SELECT * FROM issues ORDER BY id DESC LIMIT 250')]
+@app.patch('/api/issues/{iid}')
+async def issue_update(iid:int,p:dict,authorization:str|None=Header(default=None)):
+    a=require_auth(authorization);require_manager(a);st=p.get('status')
+    with db() as c:
+        if st=='resolved':c.execute('UPDATE issues SET status=?,resolved_at=? WHERE id=?',(st,now(),iid))
+        elif st:c.execute('UPDATE issues SET status=? WHERE id=?',(st,iid))
+        iss=dict(c.execute('SELECT * FROM issues WHERE id=?',(iid,)).fetchone())
+    await manager.broadcast({'type':'issue_updated','issue':iss},visible=lambda actor:actor['kind']=='account')
     return {'ok':True}
 
 @app.post('/api/devices/register')
-def device_register(x:DeviceIn):
+async def device_register(x:DeviceIn):
     # Client device registration remains local-network friendly and does not require a Control Centre login.
-    with db() as c:c.execute("INSERT INTO devices(name,role,room_id,event_id,operator,online_status,last_heartbeat,app_version) VALUES(?,?,?,?,?,'online',?,?) ON CONFLICT(name) DO UPDATE SET role=excluded.role,room_id=excluded.room_id,event_id=excluded.event_id,operator=excluded.operator,online_status='online',last_heartbeat=excluded.last_heartbeat,app_version=excluded.app_version",(x.name,x.role,x.room_id,x.event_id,x.operator,now(),x.app_version))
+    with db() as c:
+        c.execute("INSERT INTO devices(name,role,room_id,event_id,operator,online_status,last_heartbeat,app_version) VALUES(?,?,?,?,?,'online',?,?) ON CONFLICT(name) DO UPDATE SET role=excluded.role,room_id=excluded.room_id,event_id=excluded.event_id,operator=excluded.operator,online_status='online',last_heartbeat=excluded.last_heartbeat,app_version=excluded.app_version",(x.name,x.role,x.room_id,x.event_id,x.operator,now(),x.app_version))
+        d=dict(c.execute('SELECT * FROM devices WHERE name=?',(x.name,)).fetchone())
+    await manager.broadcast({'type':'device_updated','device':d},visible=lambda actor:actor['kind']=='account')
     return {'ok':True}
 @app.post('/api/devices/heartbeat')
-def device_heartbeat(p:dict):
-    with db() as c:c.execute("UPDATE devices SET online_status='online',last_heartbeat=? WHERE name=?",(now(),p.get('name','')))
+async def device_heartbeat(p:dict):
+    name=p.get('name','')
+    sets=['online_status=\'online\'','last_heartbeat=?'];vals=[now()]
+    if 'presenting' in p:sets.append('presenting=?');vals.append(1 if p.get('presenting') else 0)
+    if 'uptime_seconds' in p:sets.append('uptime_seconds=?');vals.append(int(p.get('uptime_seconds') or 0))
+    if 'room_id' in p:sets.append('room_id=?');vals.append(p.get('room_id'))
+    if 'event_id' in p:sets.append('event_id=?');vals.append(p.get('event_id'))
+    if 'operator' in p:sets.append('operator=?');vals.append(p.get('operator') or '')
+    if 'diagnostics' in p:sets.append('diagnostics=?');vals.append(json.dumps(p.get('diagnostics'))[:2000])
+    vals.append(name)
+    with db() as c:
+        c.execute(f"UPDATE devices SET {','.join(sets)} WHERE name=?",vals)
+        row=c.execute('SELECT * FROM devices WHERE name=?',(name,)).fetchone()
+        d=dict(row) if row else None
+    if d:await manager.broadcast({'type':'device_updated','device':d},visible=lambda actor:actor['kind']=='account')
     return {'ok':True}
 
 @app.websocket('/ws')
 async def websocket(w:WebSocket):
-    await w.accept()
+    token=w.query_params.get('token','')
+    if not setup_complete():
+        await w.close(code=4401);return
+    actor=actor_for_token(token)
+    if not actor:
+        await w.close(code=4401);return
+    await manager.connect(w,actor)
+    if actor['kind']=='operator':
+        await manager.broadcast({'type':'presence_updated','room_id':actor['room_id'],**manager.room_presence(actor['room_id'])},visible=lambda a:a['kind']=='account')
     try:
         while True:await w.receive_text()
     except WebSocketDisconnect:pass
+    finally:
+        manager.disconnect(w)
+        if actor['kind']=='operator':
+            await manager.broadcast({'type':'presence_updated','room_id':actor['room_id'],**manager.room_presence(actor['room_id'])},visible=lambda a:a['kind']=='account')
+
+async def cutoff_sweeper():
+    while True:
+        with db() as c:hhmm=setting(c,'daily_logoff_utc','03:00')
+        delay=max(1,(next_cutoff(hhmm)-datetime.now(timezone.utc)).total_seconds())
+        await asyncio.sleep(delay)
+        with db() as c:
+            c.execute('DELETE FROM sessions')
+            c.execute('DELETE FROM operator_sessions')
+        await manager.broadcast({'type':'force_logout'})
+@app.on_event('startup')
+async def _on_startup():
+    asyncio.create_task(cutoff_sweeper())
