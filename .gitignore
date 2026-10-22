@@ -5,6 +5,13 @@ dist/
 build/
 *.msi
 *.exe
+client/installer/Output/
+client/installer/Publish/
+client/installer/.tools/
+client/installer/PublishedFiles.wxs
+client/installer/Logs/
+*.wixpdb
+*.sha256
 
 # Python
 __pycache__/

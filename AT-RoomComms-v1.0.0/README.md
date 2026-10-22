@@ -78,6 +78,6 @@ Expected version:
 
 ## Upgrade source
 
-V1 uses the proven v0.3.3 application as its functional baseline and applies V1 migration, versioning and frontend reliability fixes during the Docker build/startup process.
+V1 uses the proven v0.3.4 application (includes the live-chat overhaul: WebSocket push updates, message edit/delete, priority colour coding) as its functional baseline and applies V1 migration, versioning and frontend reliability fixes during the Docker build/startup process.
 
 Current release: **AT RoomComms v1.0.0**

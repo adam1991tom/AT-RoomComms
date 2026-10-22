@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 300">
+  <title>AT RoomComms</title>
+  <defs>
+    <linearGradient id="gearGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#57CBF5"/>
+      <stop offset="55%" stop-color="#1EA0DC"/>
+      <stop offset="100%" stop-color="#0C6E9C"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="1040" height="300" fill="#0B0C10"/>
+
+  <g transform="translate(10,-40) scale(0.72)">
+    <g fill="#0B0B0E">
+      <circle cx="200" cy="200" r="167"/>
+      <g>
+        <path d="M 173,40 L 176.6,16.9 Q 178,8 187,8 L 213,8 Q 222,8 223.4,16.9 L 227,40 Z"/>
+        <path d="M 173,40 L 176.6,16.9 Q 178,8 187,8 L 213,8 Q 222,8 223.4,16.9 L 227,40 Z" transform="rotate(36 200 200)"/>
+        <path d="M 173,40 L 176.6,16.9 Q 178,8 187,8 L 213,8 Q 222,8 223.4,16.9 L 227,40 Z" transform="rotate(72 200 200)"/>
+        <path d="M 173,40 L 176.6,16.9 Q 178,8 187,8 L 213,8 Q 222,8 223.4,16.9 L 227,40 Z" transform="rotate(108 200 200)"/>
+        <path d="M 173,40 L 176.6,16.9 Q 178,8 187,8 L 213,8 Q 222,8 223.4,16.9 L 227,40 Z" transform="rotate(144 200 200)"/>
+        <path d="M 173,40 L 176.6,16.9 Q 178,8 187,8 L 213,8 Q 222,8 223.4,16.9 L 227,40 Z" transform="rotate(180 200 200)"/>
+        <path d="M 173,40 L 176.6,16.9 Q 178,8 187,8 L 213,8 Q 222,8 223.4,16.9 L 227,40 Z" transform="rotate(216 200 200)"/>
+        <path d="M 173,40 L 176.6,16.9 Q 178,8 187,8 L 213,8 Q 222,8 223.4,16.9 L 227,40 Z" transform="rotate(252 200 200)"/>
+        <path d="M 173,40 L 176.6,16.9 Q 178,8 187,8 L 213,8 Q 222,8 223.4,16.9 L 227,40 Z" transform="rotate(288 200 200)"/>
+        <path d="M 173,40 L 176.6,16.9 Q 178,8 187,8 L 213,8 Q 222,8 223.4,16.9 L 227,40 Z" transform="rotate(324 200 200)"/>
+      </g>
+    </g>
+    <g fill="url(#gearGrad)">
+      <circle cx="200" cy="200" r="160"/>
+      <g>
+        <path d="M 180,40 L 183.8,20.9 Q 185,15 191,15 L 209,15 Q 215,15 216.2,20.9 L 220,40 Z"/>
+        <path d="M 180,40 L 183.8,20.9 Q 185,15 191,15 L 209,15 Q 215,15 216.2,20.9 L 220,40 Z" transform="rotate(36 200 200)"/>
+        <path d="M 180,40 L 183.8,20.9 Q 185,15 191,15 L 209,15 Q 215,15 216.2,20.9 L 220,40 Z" transform="rotate(72 200 200)"/>
+        <path d="M 180,40 L 183.8,20.9 Q 185,15 191,15 L 209,15 Q 215,15 216.2,20.9 L 220,40 Z" transform="rotate(108 200 200)"/>
+        <path d="M 180,40 L 183.8,20.9 Q 185,15 191,15 L 209,15 Q 215,15 216.2,20.9 L 220,40 Z" transform="rotate(144 200 200)"/>
+        <path d="M 180,40 L 183.8,20.9 Q 185,15 191,15 L 209,15 Q 215,15 216.2,20.9 L 220,40 Z" transform="rotate(180 200 200)"/>
+        <path d="M 180,40 L 183.8,20.9 Q 185,15 191,15 L 209,15 Q 215,15 216.2,20.9 L 220,40 Z" transform="rotate(216 200 200)"/>
+        <path d="M 180,40 L 183.8,20.9 Q 185,15 191,15 L 209,15 Q 215,15 216.2,20.9 L 220,40 Z" transform="rotate(252 200 200)"/>
+        <path d="M 180,40 L 183.8,20.9 Q 185,15 191,15 L 209,15 Q 215,15 216.2,20.9 L 220,40 Z" transform="rotate(288 200 200)"/>
+        <path d="M 180,40 L 183.8,20.9 Q 185,15 191,15 L 209,15 Q 215,15 216.2,20.9 L 220,40 Z" transform="rotate(324 200 200)"/>
+      </g>
+    </g>
+    <circle cx="200" cy="196" r="128" fill="#0B0B0E"/>
+    <path d="M 180,308 Q 188,340 194,352 Q 200,340 208,306 Z" fill="#0B0B0E"/>
+    <text x="199" y="238" text-anchor="middle" font-family="'Segoe UI',system-ui,Arial,sans-serif" font-weight="800" font-size="140" fill="#FFFFFF" letter-spacing="-4">AT</text>
+  </g>
+
+  <g font-family="'Arial Narrow',Oswald,'Segoe UI',sans-serif" font-weight="800" font-style="italic">
+    <text x="300" y="115" font-size="46" letter-spacing="2" fill="#FFFFFF">AT</text>
+    <text x="296" y="205" font-size="92" letter-spacing="-1"><tspan fill="#1EA0DC">ROOM</tspan><tspan fill="#FFFFFF">COMMS</tspan></text>
+    <rect x="300" y="222" width="600" height="4" fill="#1EA0DC"/>
+    <text x="300" y="256" font-size="22" letter-spacing="6" fill="#7C8598" font-style="normal">LIVE EVENT OPERATIONS &amp; COMMUNICATIONS</text>
+  </g>
+</svg>

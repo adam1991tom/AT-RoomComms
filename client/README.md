@@ -1,6 +1,6 @@
-# AT RoomComms Client v0.2.0 — Genuine MSI
+# AT RoomComms Client v0.4.0 — Genuine MSI
 
-This is the separate Windows client for **AT RoomComms Server v0.2.0**.
+This is the separate Windows client for the **AT RoomComms Server** (self-hosted event operations platform). It is a thin native shell around the server's own web app — most features live server-side and just need the current server version, not a specific client build.
 
 ## Client features
 
@@ -31,7 +31,7 @@ installer\BUILD-MSI.cmd
 The builder requests Administrator permission, publishes the client, downloads WiX locally, and creates:
 
 ```text
-installer\Output\AT-RoomComms-Client-v0.2.0-x64.msi
+installer\Output\AT-RoomComms-Client-v0.4.0-x64.msi
 ```
 
 ## Normal installation
@@ -55,13 +55,13 @@ before saving it.
 Without a preconfigured server:
 
 ```cmd
-msiexec.exe /i "AT-RoomComms-Client-v0.2.0-x64.msi" /qn /norestart
+msiexec.exe /i "AT-RoomComms-Client-v0.4.0-x64.msi" /qn /norestart
 ```
 
 With the server preconfigured:
 
 ```cmd
-msiexec.exe /i "AT-RoomComms-Client-v0.2.0-x64.msi" /qn /norestart SERVERURL="http://10.100.70.101:5070"
+msiexec.exe /i "AT-RoomComms-Client-v0.4.0-x64.msi" /qn /norestart SERVERURL="http://10.100.70.101:5070"
 ```
 
 ## Action1
@@ -69,13 +69,13 @@ msiexec.exe /i "AT-RoomComms-Client-v0.2.0-x64.msi" /qn /norestart SERVERURL="ht
 Upload the MSI as a custom package and use:
 
 ```cmd
-msiexec.exe /i "AT-RoomComms-Client-v0.2.0-x64.msi" /qn /norestart SERVERURL="http://10.100.70.101:5070"
+msiexec.exe /i "AT-RoomComms-Client-v0.4.0-x64.msi" /qn /norestart SERVERURL="http://10.100.70.101:5070"
 ```
 
 Alternatively upload `Deployment\Install-Action1.ps1` with the MSI and run:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-Action1.ps1 -MsiPath .\AT-RoomComms-Client-v0.2.0-x64.msi -ServerUrl "http://10.100.70.101:5070"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-Action1.ps1 -MsiPath .\AT-RoomComms-Client-v0.4.0-x64.msi -ServerUrl "http://10.100.70.101:5070"
 ```
 
 ## Installed locations
@@ -149,4 +149,45 @@ The WiX icon now uses an absolute build variable rather than a working-directory
 - Speaker Preview displays every active event with all its rooms beneath it.
 - Photos and file attachments are displayed and downloadable inside the client.
 
-This client requires **AT RoomComms Server v0.2.0 or later** for attachments and native notification events.
+## v0.3.0 — the notification bridge actually works now
+The client has always listened for `window.chrome.webview.postMessage({type:'notification',...})`
+from the page, but the web app never sent it — so v0.2.0's balloon-tip feature was dead on
+arrival regardless of client version. The server's web app now posts a notification for every
+DM, help request, emergency alert, venue broadcast, room message (on Backup PC), and reported
+issue, and correctly stays silent on Main PC per the existing device-role rule.
+
+The web app also now reads the `device` and `clientVersion` query parameters this client already
+sent and registers the machine with `/api/devices/register` (with a heartbeat every 5 minutes),
+so devices actually show up server-side instead of that endpoint going unused.
+
+This client works against any current AT RoomComms server — there is no longer a pinned minimum
+server version; it degrades gracefully (no native notifications, no device registration) against
+an older server that lacks these endpoints.
+
+## v0.4.0 — a real background app, not a browser window
+
+- **Tray icon.** Closing the window minimizes to the tray instead of quitting (one-time
+  balloon explains this the first time). Right-click the tray icon for Open, Speaker
+  Preview, Settings, Check for Updates, and Quit. Both minimize-to-tray and desktop
+  notifications can be turned off from Settings.
+- **Settings window.** Replaces the old `--change-server` relaunch hack: server address +
+  test connection, minimize-to-tray, launch-at-startup, notifications, and a manual
+  "Check for updates" button, all in one place (Start menu or the tray menu).
+- **Real branding.** The app/taskbar/tray icon is now the actual AT RoomComms gear+bubble
+  mark instead of a generic placeholder, and every window shares one blue brand palette
+  (`Branding.cs`) instead of ad-hoc colors per form.
+- **Telemetry.** Every 20 seconds the client checks (via a lightweight process/window
+  check, not COM automation) whether PowerPoint is running a slideshow, and tracks its
+  own uptime, pushing both to the page for the server's Devices admin page to show. This
+  needs server v0.7.0 or later — it degrades harmlessly (data just isn't sent) against
+  an older server.
+- **Self-updating.** On launch, and on demand from Settings or the tray menu, the client
+  checks this repo's GitHub Releases for the newest `client-v*` tag. If it's newer, it
+  downloads the MSI and runs a machine-wide silent upgrade (`msiexec /qn`). If the running
+  process isn't already elevated, Windows will still show a UAC prompt for that install —
+  there's no way around that without a separate always-elevated updater service, which is
+  more machinery than this warrants right now.
+- **Startup registration moved per-user.** The old machine-wide `HKLM` Run key (couldn't
+  be overridden by an individual user) is replaced by a per-user `HKCU` key the app
+  manages itself, defaulting to on so a fresh install still starts automatically. It
+  re-applies this on every launch, so it self-heals if something else clears the key.
